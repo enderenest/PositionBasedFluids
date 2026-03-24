@@ -23,7 +23,7 @@ if(MSVC)
 add_compile_options(/arch:AVX2) #make sure SIMD optimizations take place
 endif()
 
-project(mygame)
+project(HybridSim)
 
 
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -70,7 +70,7 @@ else()
 
 endif()
 
-target_sources("${CMAKE_PROJECT_NAME}" PRIVATE ${MY_SOURCES} )
+target_sources("${CMAKE_PROJECT_NAME}" PRIVATE ${MY_SOURCES}  "include/core/Types.h")
 
 
 if(MSVC) # If using the VS compiler...

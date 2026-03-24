@@ -59,7 +59,20 @@ void NeighborSearch::build(const std::vector<Particle>& particles)
 
     _spatialLookup.resize(N);
     _startIndices.assign(_hashSize, MAX_U32);
-    _neighbors.assign(N, {});
+
+    // Reuse neighbor list storage instead of rebuilding it every frame
+    if ((I32)_neighbors.size() < N) {
+        const I32 oldSize = (I32)_neighbors.size();
+        _neighbors.resize(N);
+
+        for (I32 i = oldSize; i < N; ++i) {
+            _neighbors[i].reserve(64);
+        }
+    }
+
+    for (I32 i = 0; i < N; ++i) {
+        _neighbors[i].clear();
+    }
 
     // 1) Fill spatialLookup (index + key)
     for (I32 i = 0; i < N; ++i) {
@@ -85,9 +98,6 @@ void NeighborSearch::build(const std::vector<Particle>& particles)
     for (I32 i = 0; i < N; ++i) {
         const PVec3& pi = particles[i].predPos;
         const CellCoord base = positionToCell(pi);
-
-        // Optional: reduce reallocs a bit
-        _neighbors[i].reserve(64);
 
         for (I32 dz = -1; dz <= 1; ++dz)
             for (I32 dy = -1; dy <= 1; ++dy)

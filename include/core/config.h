@@ -13,16 +13,17 @@ struct FluidConfig {
 
 	// PBF / SPH
 	F32 h = 0.2f;				// smoothing radius
-	F32 rho0 = 1000.0f;			// rest density
-	I32 solverIterations = 5;	// number of PBF solver iterations per step
+	F32 rho0 = 2000.0f;			// rest density
+	I32 solverIterations = 3;	// number of PBF solver iterations per step
+	I32 substepIterations = 2;	// number of substeps (internal steps with smaller dt for stability)
 	F32 eps = 0.001;			// small epsilon to prevent division by zero in lambda computation
 
 	// Spawn
-	I32  particleCount = 1000;
+	I32  particleCount = 500;
 	PVec3 spawnMin = { 0.0f, 0.0f, 0.0f };
 	PVec3 spawnMax = { 1.0f, 1.0f, 1.0f };
-	bool spawnRandom = true;  // false=grid with spacing, true=random with particleCount
-	F32  spacing = 0.08f;      // used if spawnRandom == false
+	bool spawnRandom = true;	// false=grid with spacing, true=random with particleCount
+	F32  spacing = 0.08f;		// used if spawnRandom == false
 	PVec3 initialVelocity = { 0.0f, 0.0f, 0.0f };
 	
 	// Boundary handling (simple AABB for now, later convert to signed distance field)
@@ -41,7 +42,7 @@ struct FluidConfig {
 
 	// XSPH viscosity
 	bool enableViscosity = false;
-	F32 viscosity = 0.001f;
+	F32 viscosity = 0.2f;
 };
 
 // ---------------------------

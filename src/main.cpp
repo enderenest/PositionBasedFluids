@@ -130,9 +130,6 @@ int main() {
 
     Config cfg{};
 
-    // ---------------------------
-    // FIX #1: PBFluids takes FluidConfig (physics), NOT Config (global)
-    // ---------------------------
     PBFluids fluid(cfg.fluid);
     fluid.setParams(cfg.fluid);
     fluid.setParticles(spawnParticlesFromConfig(cfg.fluid));
@@ -164,11 +161,6 @@ int main() {
     static bool stepOnce = false;
     static bool respawnRequested = false;
 
-    // ---------------------------
-    // FIX #2: One helper that always applies padding+bounds+box geometry together.
-    // Why? Because setBounds() "bakes" collision padding into internal min/max.
-    // If you change pointRadius without calling setBounds again, padding won't affect collision.
-    // ---------------------------
     auto applyBoundsAndBox = [&]() {
         // re-apply collision padding (viewer radius)
         fluid.setCollisionPadding(cfg.viewer.pointRadius);
@@ -216,6 +208,7 @@ int main() {
         solverChanged |= ImGui::SliderFloat("h (smoothing radius)", &cfg.fluid.h, 0.01f, 0.30f);
         solverChanged |= ImGui::SliderFloat("rho0 (rest density)", &cfg.fluid.rho0, 100.0f, 3000.0f);
         solverChanged |= ImGui::SliderInt("solver iterations", &cfg.fluid.solverIterations, 1, 12);
+        solverChanged |= ImGui::SliderInt("substep iterations", &cfg.fluid.substepIterations, 1, 5);
         solverChanged |= ImGui::SliderFloat("eps", &cfg.fluid.eps, 1e-8f, 1e-3f, "%.8f", ImGuiSliderFlags_Logarithmic);
 
         // Spawn
@@ -276,15 +269,13 @@ int main() {
             psCloud->setPointRadius(cfg.viewer.pointRadius, false);
         }
 
-        // FIX #3: whenever pointRadius OR bounds change, re-apply bounds & box.
+        // whenever pointRadius OR bounds change, re-apply bounds & box.
         if (viewerChanged || boundsChanged) {
             applyBoundsAndBox();
         }
 
-        // FIX #4: PBFluids expects FluidConfig, not Config
         if (solverChanged || scorrChanged) {
             fluid.setParams(cfg.fluid);
-            // If h/hashSize changed, bounds padding may need to be re-applied too
             applyBoundsAndBox();
         }
 

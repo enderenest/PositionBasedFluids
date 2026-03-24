@@ -198,12 +198,12 @@ PVec3 calcGradCubicKernel(const PVec3& r, const F32 h)
 
 F32 calcDensityKernel(const PVec3& r, const F32 h)
 {
-    return calcCubicKernel(r, h);
+    return calcSpikyPow2Kernel(r, h);
 }
 
 PVec3 calcDensityDerivative(const PVec3& r, const F32 h)
 {
-    return calcGradCubicKernel(r, h);
+    return calcGradSpikyPow3Kernel(r, h);
 }
 
 F32 calcViscosityKernel(const PVec3& r, const F32 h)

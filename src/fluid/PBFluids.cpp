@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+
 // ------------------------------------------------------------
 // Construction / setup
 // ------------------------------------------------------------
@@ -50,15 +51,32 @@ void PBFluids::step()
 {
     if (_particles.empty()) return;
 
-    applyForcesAndPredict();
+    // Slice the macro time step into smaller sub-steps
+    const F32 macroDt = _params.dt;
+    const I32 substeps = _params.substepIterations; 
+    const F32 subDt = macroDt / (F32)substeps;
 
-    _neighborSearch.build(_particles);
+    // Temporarily overwrite the parameter dt so all helper functions use subDt
+    _params.dt = subDt;
 
-    solverIterationLoop();
+    // XPBD Substepping Loop
+    for (I32 s = 0; s < substeps; ++s) {
 
-    updateVelocityFromPred();
-	applyViscosityXSPH();
-    commitPositions();
+        applyForcesAndPredict();
+
+        _neighborSearch.build(_particles);
+
+        // Constraint Solving 
+        solverIterationLoop();
+
+        // Update velocity and finalize positions for THIS substep
+        updateVelocityFromPred();
+        applyViscosityXSPH();
+        commitPositions();
+    }
+
+    // Restore the original macro dt for the next frame
+    _params.dt = macroDt;
 }
 
 // ------------------------------------------------------------
@@ -109,11 +127,13 @@ F32 PBFluids::computeDensity(I32 i) const
     F32 rho = 0.0f;
 
     // 1. Particle's own density contribution
-    // rho += m * calcDensityKernel(make_pvec3(0.0f, 0.0f, 0.0f), h);
+    rho += m * calcDensityKernel(make_pvec3(0.0f, 0.0f, 0.0f), h);
 
     // 2. Real fluid neighbors contribution
     const auto& neigh = _neighborSearch.getNeighbors(i);
     for (I32 j : neigh) {
+        if (i == j) continue;
+
         if (_particles[j].invMass > 0.0f) {
             const F32 mj = 1.0f / _particles[j].invMass;
             rho += mj * calcDensityKernel(xi - _particles[j].predPos, h);
@@ -148,7 +168,7 @@ F32 PBFluids::computeSCorr(const PVec3& dpos) const
     return -k * std::pow(ratio, n);
 }
 
-/*std::vector<PVec3> PBFluids::getGhostRelativeVectors(const PVec3& pos) const
+/* std::vector<PVec3> PBFluids::getGhostRelativeVectors(const PVec3& pos) const
 {
     std::vector<PVec3> r_ghosts;
     const F32 h = _params.h;
@@ -166,7 +186,7 @@ F32 PBFluids::computeSCorr(const PVec3& dpos) const
     if (_maxBound.z - pos.z < h) r_ghosts.push_back(make_pvec3(0.0f, 0.0f, -2.0f * (_maxBound.z - pos.z)));
 
     return r_ghosts;
-}*/
+} */
 
 // ------------------------------------------------------------
 // Lambda computation (weighted by invMass)
@@ -199,6 +219,8 @@ void PBFluids::computeLambdas()
 
         const auto& neigh = _neighborSearch.getNeighbors(i);
         for (I32 j : neigh) {
+            if (i == j) continue;
+
             const F32 wj = _particles[j].invMass;
             if (wj <= 0.0f) continue;
 
@@ -244,6 +266,7 @@ void PBFluids::computeDeltaP()
 
         const auto& neigh = _neighborSearch.getNeighbors(i);
         for (I32 j : neigh) {
+            if (i == j) continue;
 
             const F32 wj = _particles[j].invMass;
             if (wj <= 0.0f) continue;
@@ -282,7 +305,7 @@ void PBFluids::applyViscosityXSPH()
     const F32 c = _params.viscosity;
     const I32 N = (I32)_particles.size();
 
-	if (_params.enableViscosity != 0) return;
+	if (_params.enableViscosity == 0) return;
 
     std::vector<PVec3> newVelocities(N);
 
@@ -297,6 +320,8 @@ void PBFluids::applyViscosityXSPH()
 
         const auto& neigh = _neighborSearch.getNeighbors(i);
         for (I32 j : neigh) {
+            if (i == j) continue;
+
             const F32 wj = _particles[j].invMass;
             if (wj <= 0.0f) continue;
 
@@ -305,7 +330,8 @@ void PBFluids::applyViscosityXSPH()
             PVec3 rij = _particles[i].predPos - _particles[j].predPos;
             F32 w = calcViscosityKernel(rij, h);
 
-            viscosityForce += (v_j - v_i) * w;
+            const F32 mj = 1.0f / wj;
+            viscosityForce += (v_j - v_i) * w * (mj / _params.rho0);
         }
 
         newVelocities[i] = v_i + viscosityForce * c;
@@ -325,34 +351,28 @@ void PBFluids::handleCollisions()
     for (auto& p : _particles) {
         if (p.invMass <= 0.0f) continue;
 
-        // X Ekseni
+        // X Axis
         if (p.predPos.x < _minBound.x) {
             p.predPos.x = _minBound.x;
-            p.vel.x *= -_boundDamping;
         }
         else if (p.predPos.x > _maxBound.x) {
             p.predPos.x = _maxBound.x;
-            p.vel.x *= -_boundDamping;
         }
 
-        // Y Ekseni
+        // Y Axis
         if (p.predPos.y < _minBound.y) {
             p.predPos.y = _minBound.y;
-            p.vel.y *= -_boundDamping;
         }
         else if (p.predPos.y > _maxBound.y) {
             p.predPos.y = _maxBound.y;
-            p.vel.y *= -_boundDamping;
         }
 
-        // Z Ekseni
+        // Z Axis
         if (p.predPos.z < _minBound.z) {
             p.predPos.z = _minBound.z;
-            p.vel.z *= -_boundDamping;
         }
         else if (p.predPos.z > _maxBound.z) {
             p.predPos.z = _maxBound.z;
-            p.vel.z *= -_boundDamping;
         }
     }
 }
@@ -368,7 +388,16 @@ void PBFluids::updateVelocityFromPred()
 
     for (auto& p : _particles) {
         if (p.invMass <= 0.0f) continue;
+
+        const bool collidedX = (p.predPos.x <= _minBound.x || p.predPos.x >= _maxBound.x);
+        const bool collidedY = (p.predPos.y <= _minBound.y || p.predPos.y >= _maxBound.y);
+        const bool collidedZ = (p.predPos.z <= _minBound.z || p.predPos.z >= _maxBound.z);
+
         p.vel = (p.predPos - p.pos) * invDt;
+
+        if (collidedX) p.vel.x *= -_boundDamping;
+        if (collidedY) p.vel.y *= -_boundDamping;
+        if (collidedZ) p.vel.z *= -_boundDamping;
     }
 }
 

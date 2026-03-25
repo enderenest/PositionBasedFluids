@@ -98,6 +98,9 @@ private:
 
     // Solution to density problem on boundaries
     std::vector<PVec3> getGhostRelativeVectors(const PVec3& pos) const;
+
+    // Derived precomputed constants
+    F32 _wq;
 };
 
 #endif

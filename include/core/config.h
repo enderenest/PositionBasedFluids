@@ -7,42 +7,42 @@
 // Fluid config (CPU PBF now, later convert it to GPU format)
 // ---------------------------
 struct FluidConfig {
-	// time
-	F32 dt = 1.0f / 60.0f;
-	PVec3 gravity = { 0.0f, -9.81f, 0.0f };
+	// time step - use fixed small dt with substeps for stability
+	F32 dt = 1.0f / 60.0f;						// macro timestep: 60 FPS
+	PVec3 gravity = { 0.0f, -9.81f, 0.0f };		// realistic gravity
 
-	// PBF / SPH
-	F32 h = 0.2f;				// smoothing radius
-	F32 rho0 = 2000.0f;			// rest density
-	I32 solverIterations = 3;	// number of PBF solver iterations per step
-	I32 substepIterations = 2;	// number of substeps (internal steps with smaller dt for stability)
-	F32 eps = 0.001;			// small epsilon to prevent division by zero in lambda computation
+	// PBF / SPH kernels
+	F32 h = 0.20f;								// smoothing radius: h/spacing = 2.0 is the minimum stable ratio for PBF
+	F32 rho0 = 1000.0f;							// rest density calibrated to natural packing: ~1024 for m=1, h=0.2, spacing=0.1
+	I32 solverIterations = 3;					// PBF needs 5-10 iterations to converge
+	I32 substepIterations = 2;					// smaller substeps improve stability
+	F32 eps = 0.0001f;							// constraint regularization
 
-	// Spawn
-	I32  particleCount = 500;
-	PVec3 spawnMin = { 0.0f, 0.0f, 0.0f };
-	PVec3 spawnMax = { 1.0f, 1.0f, 1.0f };
-	bool spawnRandom = true;	// false=grid with spacing, true=random with particleCount
-	F32  spacing = 0.08f;		// used if spawnRandom == false
+	// Spawn configuration
+	I32  particleCount = 1024;					// 64^3 cube = reasonable for CPU testing
+	PVec3 spawnMin = { 0.25f, 0.25f, 0.25f };	// centered region
+	PVec3 spawnMax = { 1.75f, 1.75f, 1.75f };	// 2 unit cube
+	bool spawnRandom = false;					// grid spawn: ensures uniform spacing, no initial overlaps
+	F32  spacing = 0.1f;						// matches smoothing radius (critical for neighbor search)
 	PVec3 initialVelocity = { 0.0f, 0.0f, 0.0f };
-	
-	// Boundary handling (simple AABB for now, later convert to signed distance field)
-	PVec3 boundsMin = { 0.0f, 0.0f, 0.0f };
-	PVec3 boundsMax = { 1.0f, 1.0f, 1.0f };
-	F32 boundDamping = 0.95f;
 
-	// Neighbor search hash grid size
-	U32 hashSize = 1 << 14;
-		 
-	// sCorr
-	bool enableSCorr = false;
-	F32 kCorr = 0.01f;
-	F32 nCorr = 4.0f;
-	F32 deltaQ = 0.3f;
+	// Boundary handling
+	PVec3 boundsMin = { 0.0f, 0.0f, 0.0f };		// lower corner
+	PVec3 boundsMax = { 2.0f, 2.0f, 2.0f };		// upper corner (1 unit margin on each side)
+	F32 boundDamping = 0.5f;					
 
-	// XSPH viscosity
-	bool enableViscosity = false;
-	F32 viscosity = 0.2f;
+	// Neighbor search hash grid
+	U32 hashSize = 1 << 16;						// 65536 cells (increased from 1<<14 for 4K particles)
+
+	// Surface tension correction (sCorr) - essential for surface stability
+	bool enableSCorr = true;					// enable to suppress particle clustering
+	F32 kCorr = 0.001f;							// tensile correction strength (needs to be non-trivial with unclamped lambdas)
+	F32 nCorr = 4.0f;							// standard exponent
+	F32 deltaQ = 0.3f;							// reference distance ratio: 0.5 * h = 0.1 = particle spacing
+
+	// XSPH viscosity - moderate damping
+	bool enableViscosity = true;				// enable for energy dissipation
+	F32 viscosity = 0.0f;						// low viscosity to preserve fluid dynamics
 };
 
 // ---------------------------

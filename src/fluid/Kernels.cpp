@@ -196,22 +196,29 @@ PVec3 calcGradCubicKernel(const PVec3& r, const F32 h)
     return res;
 }
 
+
+
 F32 calcDensityKernel(const PVec3& r, const F32 h)
-{
-    return calcSpikyPow2Kernel(r, h);
-}
-
-PVec3 calcDensityDerivative(const PVec3& r, const F32 h)
-{
-    return calcGradSpikyPow3Kernel(r, h);
-}
-
-F32 calcViscosityKernel(const PVec3& r, const F32 h)
 {
     return calcPoly6Kernel(r, h);
 }
 
-PVec3 calcViscosityDerivative(const PVec3& r, const F32 h)
+PVec3 calcDensityDerivative(const PVec3& r, const F32 h)
 {
-    return calcGradPoly6Kernel(r, h);
+    return calcGradSpikyPow2Kernel(r, h);
+}
+
+PVec3 calcLambdaDerivative(const PVec3& r, const F32 h)
+{
+    return calcGradSpikyPow3Kernel(r, h);
+}
+
+F32 calcSCorrKernel(const PVec3& r, const F32 h)
+{
+    return calcPoly6Kernel(r, h);
+}
+
+F32 calcXSPHKernel(const PVec3& r, const F32 h)
+{
+    return calcPoly6Kernel(r, h);
 }

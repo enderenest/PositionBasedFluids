@@ -9,8 +9,6 @@
 // ------------------------------------------------------------
 
 PBFluids::PBFluids(const FluidConfig& p)
-	: _params(p)
-	, _neighborSearch(_params.h, (U32)_params.hashSize)
 {
 	setParams(p);
 }
@@ -30,7 +28,8 @@ void PBFluids::setParticles(const std::vector<Particle>& particles)
 {
 	_particles = particles;
 
-	const I32 N = (I32)_particles.size();
+	const size_t N = _particles.size();
+
 	_lambda.assign(N, 0.0f);
 	_deltaP.assign(N, make_pvec3(0.0f, 0.0f, 0.0f));
 }

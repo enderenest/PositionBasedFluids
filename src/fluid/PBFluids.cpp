@@ -92,16 +92,8 @@ void PBFluids::applyForcesAndPredict()
 	const F32 dt = _params.dt;
 
 	for (auto& p : _particles) {
-		if (p.invMass <= 0.0f) {
-			p.predPos = p.pos;
-			continue;
-		}
-
-		// gravity
-		p.vel += _params.gravity * dt;
-
-		// predict
-		p.predPos = p.pos + p.vel * dt;
+		p.vel += _params.gravity * dt; // gravity
+		p.predPos = p.pos + p.vel * dt; // predict
 	}
 }
 
@@ -123,31 +115,25 @@ F32 PBFluids::computeDensity(I32 i) const
 {
 	const F32 h = _params.h;
 	const PVec3 xi = _particles[i].predPos;
-	const F32 invM = _particles[i].invMass;
-
-	if (invM <= 0.0f) return 0.0f;
-	const F32 m = 1.0f / invM;
 
 	F32 rho = 0.0f;
 
 	// 1. Particle's own density contribution
-	rho += m * calcDensityKernel(make_pvec3(0.0f, 0.0f, 0.0f), h);
+	rho += calcDensityKernel(make_pvec3(0.0f, 0.0f, 0.0f), h);
 
 	// 2. Real fluid neighbors contribution
 	const auto& neigh = _neighborSearch.getNeighbors(i);
 	for (I32 j : neigh) {
 		if (i == j) continue;
 
-		if (_particles[j].invMass > 0.0f) {
-			const F32 mj = 1.0f / _particles[j].invMass;
-			rho += mj * calcDensityKernel(xi - _particles[j].predPos, h);
-		}
+		rho += calcDensityKernel(xi - _particles[j].predPos, h);
 	}
 
+	// NOT WORKING WELL: Particles are sticking to the walls
 	// 3. Ghost particle contributions (boundary density fix)
 	const std::vector<PVec3> ghostVectors = getGhostRelativeVectors(xi);
 	for (const PVec3& rij : ghostVectors) {
-		rho += m * calcDensityKernel(rij, h);
+		rho += calcDensityKernel(rij, h);
 	}
 
 	return rho;
@@ -206,14 +192,6 @@ void PBFluids::computeLambdas()
 	const F32 eps = _params.eps;
 
 	for (I32 i = 0; i < N; ++i) {
-		const F32 wi = _particles[i].invMass;
-		if (wi <= 0.0f) {
-			_lambda[i] = 0.0f;
-			continue;
-		}
-
-		const F32 mi = 1.0f / wi; // Particle's own mass
-
 		const PVec3 xi = _particles[i].predPos;
 		const F32 rho_i = computeDensity(i);
 		const F32 C_i = std::max((rho_i / rho0) - 1.0f, 0.0f); // CRITICAL FIX: The Clamp
@@ -225,25 +203,21 @@ void PBFluids::computeLambdas()
 		for (I32 j : neigh) {
 			if (i == j) continue;
 
-			const F32 wj = _particles[j].invMass;
-			if (wj <= 0.0f) continue;
-
-			const F32 mj = 1.0f / wj; // Extract neighbor's mass
-
 			const PVec3 rij = xi - _particles[j].predPos;
 			PVec3 gradW = calcLambdaDerivative(rij, h);
 
-			PVec3 grad_Ci_j = gradW * (-mj / rho0);
+			PVec3 grad_Ci_j = gradW * (-1.0f / rho0);
 			sum_grad_Ci_sq += dot(grad_Ci_j, grad_Ci_j);
 
-			grad_Ci_i += gradW * (mj / rho0);
+			grad_Ci_i += gradW * (1.0f / rho0);
 		}
 
+		// NOT WORKING WELL: Particles are sticking to the walls
 		// Ghost contributions to self-gradient (static mirrors, no per-ghost lambda term)
 		const std::vector<PVec3> ghostVecs = getGhostRelativeVectors(xi);
 		for (const PVec3& rghost : ghostVecs) {
 			const PVec3 gradW = calcLambdaDerivative(rghost, h);
-			grad_Ci_i += gradW * (mi / rho0);
+			grad_Ci_i += gradW * (1.0f / rho0);
 		}
 
 		sum_grad_Ci_sq += dot(grad_Ci_i, grad_Ci_i);
@@ -266,12 +240,6 @@ void PBFluids::computeDeltaP()
 	}
 
 	for (I32 i = 0; i < N; ++i) {
-
-		const F32 wi = _particles[i].invMass;
-		if (wi <= 0.0f) continue;
-
-		const F32 mi = 1.0f / wi;
-
 		const PVec3 xi = _particles[i].predPos;
 		PVec3 dp = make_pvec3(0.0f, 0.0f, 0.0f);
 
@@ -279,21 +247,16 @@ void PBFluids::computeDeltaP()
 		const auto& neigh = _neighborSearch.getNeighbors(i);
 		for (I32 j : neigh) {
 			if (i == j) continue;
-
-			const F32 wj = _particles[j].invMass;
-			if (wj <= 0.0f) continue;
-
-			const F32 mj = 1.0f / wj; // Extract neighbor's mass
-
 			const PVec3 rij = xi - _particles[j].predPos;
 			const PVec3 gradW = calcLambdaDerivative(rij, h);
 
 			const F32 scorr = computeSCorr(rij);
 			const F32 s = (_lambda[i] + _lambda[j] + scorr);
 
-			dp += gradW * (s * mj);
+			dp += gradW * s;
 		}
 
+		// NOT WORKING WELL: Particles are sticking to the walls
 		// 2. Contributions from ghost particles (boundary repulsion)
 		const std::vector<PVec3> ghostVecs = getGhostRelativeVectors(xi);
 		for (const PVec3& ghost : ghostVecs) {
@@ -304,8 +267,8 @@ void PBFluids::computeDeltaP()
 			// 2. We DO NOT apply scorr to boundary interactions to prevent unnatural wall-jitter.
 			const F32 s = 2.0f * _lambda[i];
 
-			// Treat the ghost as having the same mass as the particle (mi)
-			dp += gradW * (s * mi);
+			// Treat the ghost as having the same mass as the particle
+			dp += gradW * s;
 		}
 
 		_deltaP[i] = dp * (1.0f / rho0);
@@ -316,7 +279,6 @@ void PBFluids::applyDeltaP()
 {
 	const I32 N = (I32)_particles.size();
 	for (I32 i = 0; i < N; ++i) {
-		if (_particles[i].invMass <= 0.0f) continue;
 		_particles[i].predPos += _deltaP[i];
 	}
 }
@@ -336,11 +298,6 @@ void PBFluids::applyViscosityXSPH()
 	std::vector<PVec3> newVelocities(N);
 
 	for (I32 i = 0; i < N; ++i) {
-		if (_particles[i].invMass <= 0.0f) {
-			newVelocities[i] = _particles[i].vel;
-			continue;
-		}
-
 		PVec3 v_i = _particles[i].vel;
 		PVec3 viscosityForce = make_pvec3(0.0f, 0.0f, 0.0f);
 
@@ -348,16 +305,12 @@ void PBFluids::applyViscosityXSPH()
 		for (I32 j : neigh) {
 			if (i == j) continue;
 
-			const F32 wj = _particles[j].invMass;
-			if (wj <= 0.0f) continue;
-
 			PVec3 v_j = _particles[j].vel;
 
 			PVec3 rij = _particles[i].predPos - _particles[j].predPos;
 			F32 w = calcXSPHKernel(rij, h);
 
-			const F32 mj = 1.0f / wj;
-			viscosityForce += (v_j - v_i) * w * (mj / _params.rho0);
+			viscosityForce += (v_j - v_i) * w * (1.0f / _params.rho0);
 		}
 
 		newVelocities[i] = v_i + viscosityForce * c;
@@ -375,8 +328,6 @@ void PBFluids::applyViscosityXSPH()
 void PBFluids::handleCollisions()
 {
 	for (auto& p : _particles) {
-		if (p.invMass <= 0.0f) continue;
-
 		// X Axis
 		if (p.predPos.x < _minBound.x) {
 			p.predPos.x = _minBound.x;
@@ -413,8 +364,6 @@ void PBFluids::updateVelocityFromPred()
 	const F32 invDt = (dt > 0.0f) ? (1.0f / dt) : 0.0f;
 
 	for (auto& p : _particles) {
-		if (p.invMass <= 0.0f) continue;
-
 		const bool collidedX = (p.predPos.x <= _minBound.x || p.predPos.x >= _maxBound.x);
 		const bool collidedY = (p.predPos.y <= _minBound.y || p.predPos.y >= _maxBound.y);
 		const bool collidedZ = (p.predPos.z <= _minBound.z || p.predPos.z >= _maxBound.z);

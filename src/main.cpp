@@ -58,8 +58,6 @@ static std::vector<Particle> spawnParticlesFromConfig(const FluidConfig& c) {
             pt.pos = p;
             pt.predPos = p;
             pt.vel = c.initialVelocity;
-            pt.invMass = 1.0f;
-            pt.phase = 0;
 
             ps.push_back(pt);
         }
@@ -74,8 +72,6 @@ static std::vector<Particle> spawnParticlesFromConfig(const FluidConfig& c) {
                     pt.pos = { x, y, z };
                     pt.predPos = pt.pos;
                     pt.vel = c.initialVelocity;
-                    pt.invMass = 1.0f;
-                    pt.phase = 0;
                     ps.push_back(pt);
                 }
             }

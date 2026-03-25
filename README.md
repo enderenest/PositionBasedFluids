@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project explores a real-time Fluid�Structure Interaction (FSI) system.
+This project explores a real-time Fluid-Structure Interaction (FSI) system.
 
 The main idea is to:
 

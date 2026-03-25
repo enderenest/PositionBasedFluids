@@ -1,4 +1,4 @@
-# Fluid�Structure Interaction (FSI) � Early Prototype
+# Fluid-Structure Interaction (FSI) - Early Prototype
 
 ## Overview
 

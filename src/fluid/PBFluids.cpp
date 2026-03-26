@@ -2,36 +2,84 @@
 
 #include <algorithm>
 #include <cmath>
-
+#include <iostream>
+#include <vector>
 
 // ------------------------------------------------------------
 // Construction / setup
 // ------------------------------------------------------------
 
 PBFluids::PBFluids(const FluidConfig& p)
+    : _uboConfig(GL_DYNAMIC_DRAW)
+    , _ssboParticles(0)
+    , _ssboSolver(0)
+    , _ssboHashGrid(0)
+    , _ssboOffsets(0)
+    , _csPredictAndHash("resources/shaders/compute/CS_PredictAndHash.glsl")
+    , _csBitonicSort("resources/shaders/compute/CS_SortGrid.glsl")
+    , _csBuildOffsets("resources/shaders/compute/CS_BuildOffsets.glsl")
+    , _csComputeLambdas("resources/shaders/compute/CS_ComputeLambdas.glsl")
+    , _csComputeDeltaP("resources/shaders/compute/CS_ComputeDeltaP.glsl")
+    , _csIntegrate("resources/shaders/compute/CS_Integrate.glsl")
 {
-	setParams(p);
+    setParams(p);
 }
 
 void PBFluids::setParams(const FluidConfig& p)
 {
-	_params = p;
-	_neighborSearch = NeighborSearch(_params.h, (U32)_params.hashSize);
-	setBounds(_params.boundsMin, _params.boundsMax, _params.boundDamping);
+    _params = p;
+    setBounds(_params.boundsMin, _params.boundsMax, _params.boundDamping);
 
-	// Precompute wq exactly once when parameters are set
-	const F32 dq = _params.deltaQ * _params.h;
-	_wq = calcSCorrKernel(make_pvec3(dq, 0.0f, 0.0f), _params.h);
+    // Precompute wq exactly once
+    const F32 dq = _params.deltaQ * _params.h;
+    _wq = calcSCorrKernel(make_pvec3(dq, 0.0f, 0.0f), _params.h);
+
+    // Pack and upload UBO
+    FluidConfigUBO uboData;
+    uboData.boundsMin = { _minBound.x, _minBound.y, _minBound.z, 0.0f };
+    uboData.boundsMax = { _maxBound.x, _maxBound.y, _maxBound.z, 0.0f };
+    uboData.gravity_dt = { _params.gravity.x, _params.gravity.y, _params.gravity.z, _params.dt / (F32)_params.substepIterations };
+
+    uboData.h = _params.h;
+    uboData.rho0 = _params.rho0;
+    uboData.eps = _params.eps;
+    uboData.wq = _wq;
+
+    uboData.kCorr = _params.kCorr;
+    uboData.nCorr = _params.nCorr;
+    uboData.viscosity = _params.viscosity;
+    uboData.boundDamping = _boundDamping;
+
+    uboData.hashSize = _params.hashSize;
+    uboData.particleCount = _params.particleCount;
+    uboData.pad1 = 0u;
+    uboData.pad2 = 0u;
+
+    _uboConfig.upload(uboData);
 }
 
 void PBFluids::setParticles(const std::vector<Particle>& particles)
 {
-	_particles = particles;
+    _particles = particles;
+    const size_t N = _particles.size();
 
-	const size_t N = _particles.size();
+    // Update particle count in params and UBO
+    _params.particleCount = (U32)N;
+    setParams(_params);
 
-	_lambda.assign(N, 0.0f);
-	_deltaP.assign(N, make_pvec3(0.0f, 0.0f, 0.0f));
+    // Allocate and upload initial particle data to SSBO 0
+    _ssboParticles.upload(_particles);
+
+    // Allocate volatile solver buffers
+    std::vector<PVec4> dummySolver(N * 2); // 2 vec4s per particle (predPos_lambda, deltaP_rho)
+    _ssboSolver.upload(dummySolver);
+
+    std::vector<UVec2> dummyHash(N); // 1 uvec2 per particle (hash, original_id)
+    _ssboHashGrid.upload(dummyHash);
+
+    // 1 ivec2 per cell (start, end). Initialize both to -1 (empty)
+    std::vector<IVec2> dummyOffsets(_params.hashSize, { -1, -1 });
+    _ssboOffsets.upload(dummyOffsets);
 }
 
 // ------------------------------------------------------------
@@ -40,345 +88,96 @@ void PBFluids::setParticles(const std::vector<Particle>& particles)
 
 void PBFluids::setBounds(const PVec3& minBound, const PVec3& maxBound, F32 damping)
 {
-	const PVec3 pad = make_pvec3(_collisionPadding, _collisionPadding, _collisionPadding);
+    const PVec3 pad = make_pvec3(_collisionPadding, _collisionPadding, _collisionPadding);
 
-	_minBound = minBound + pad;
-	_maxBound = maxBound - pad;
-	_boundDamping = std::clamp(damping, 0.0f, 1.0f);
+    _minBound = minBound + pad;
+    _maxBound = maxBound - pad;
+    _boundDamping = std::clamp(damping, 0.0f, 1.0f);
 }
 
 // ------------------------------------------------------------
-// Main step
+// Main step (GPU Compute Pipeline)
 // ------------------------------------------------------------
 
 void PBFluids::step()
 {
-	if (_particles.empty()) return;
-
-	// Slice the macro time step into smaller sub-steps
-	const F32 macroDt = _params.dt;
-	const I32 substeps = _params.substepIterations;
-	const F32 subDt = macroDt / (F32)substeps;
-
-	// Temporarily overwrite the parameter dt so all helper functions use subDt
-	_params.dt = subDt;
-
-	// XPBD Substepping Loop
-	for (I32 s = 0; s < substeps; ++s) {
-
-		applyForcesAndPredict();
-
-		_neighborSearch.build(_particles);
-
-		// Constraint Solving 
-		solverIterationLoop();
-
-		// Update velocity and finalize positions for THIS substep
-		updateVelocityFromPred();
-		applyViscosityXSPH();
-		commitPositions();
-	}
-
-	// Restore the original macro dt for the next frame
-	_params.dt = macroDt;
-}
-
-// ------------------------------------------------------------
-// Step subroutines
-// ------------------------------------------------------------
-
-void PBFluids::applyForcesAndPredict()
-{
-	const F32 dt = _params.dt;
-
-	for (auto& p : _particles) {
-		p.vel += _params.gravity * dt; // gravity
-		p.predPos = p.pos + p.vel * dt; // predict
-	}
-}
-
-void PBFluids::solverIterationLoop()
-{
-	for (I32 iter = 0; iter < _params.solverIterations; ++iter) {
-		computeLambdas();
-		computeDeltaP();
-		applyDeltaP();
-		handleCollisions();
-	}
-}
-
-// ------------------------------------------------------------
-// Helpers (math)
-// ------------------------------------------------------------
-
-F32 PBFluids::computeDensity(I32 i) const
-{
-	const F32 h = _params.h;
-	const PVec3 xi = _particles[i].predPos;
-
-	F32 rho = 0.0f;
-
-	// 1. Particle's own density contribution
-	rho += calcDensityKernel(make_pvec3(0.0f, 0.0f, 0.0f), h);
-
-	// 2. Real fluid neighbors contribution
-	const auto& neigh = _neighborSearch.getNeighbors(i);
-	for (I32 j : neigh) {
-		if (i == j) continue;
-
-		rho += calcDensityKernel(xi - _particles[j].predPos, h);
-	}
-
-	// NOT WORKING WELL: Particles are sticking to the walls
-	// 3. Ghost particle contributions (boundary density fix)
-	const std::vector<PVec3> ghostVectors = getGhostRelativeVectors(xi);
-	for (const PVec3& rij : ghostVectors) {
-		rho += calcDensityKernel(rij, h);
-	}
-
-	return rho;
-}
-
-F32 PBFluids::computeSCorr(const PVec3& dpos) const
-{
-	if (!_params.enableSCorr) return 0.0f;
-
-	const F32 h = _params.h;
-	const F32 k = _params.kCorr;
-	const F32 n = _params.nCorr;
-
-	const F32 w = calcSCorrKernel(dpos, h);
-
-	// Safety barrier 1: Prevent negative W or uninitialized wq
-	if (_wq <= 1e-12f || w <= 0.0f) return 0.0f;
-
-	const F32 ratio = w / _wq;
-
-	// Safety barrier 2: Prevent NaN in std::pow
-	if (ratio <= 0.0f) return 0.0f;
-
-	return -k * std::pow(ratio, n);
-}
-
-std::vector<PVec3> PBFluids::getGhostRelativeVectors(const PVec3& pos) const
-{
-	std::vector<PVec3> ghosts;
-	const F32 h = _params.h;
-
-	// Check X axis walls
-	if (pos.x - _minBound.x < h) ghosts.push_back(make_pvec3(2.0f * (pos.x - _minBound.x), 0.0f, 0.0f));
-	if (_maxBound.x - pos.x < h) ghosts.push_back(make_pvec3(-2.0f * (_maxBound.x - pos.x), 0.0f, 0.0f));
-
-	// Check Y axis walls
-	if (pos.y - _minBound.y < h) ghosts.push_back(make_pvec3(0.0f, 2.0f * (pos.y - _minBound.y), 0.0f));
-	if (_maxBound.y - pos.y < h) ghosts.push_back(make_pvec3(0.0f, -2.0f * (_maxBound.y - pos.y), 0.0f));
-
-	// Check Z axis walls
-	if (pos.z - _minBound.z < h) ghosts.push_back(make_pvec3(0.0f, 0.0f, 2.0f * (pos.z - _minBound.z)));
-	if (_maxBound.z - pos.z < h) ghosts.push_back(make_pvec3(0.0f, 0.0f, -2.0f * (_maxBound.z - pos.z)));
-
-	return ghosts;
-}
-
-// ------------------------------------------------------------
-// Lambda computation (weighted by invMass)
-// ------------------------------------------------------------
-
-void PBFluids::computeLambdas()
-{
-	const I32 N = (I32)_particles.size();
-	const F32 h = _params.h;
-	const F32 rho0 = _params.rho0;
-	const F32 eps = _params.eps;
-
-	for (I32 i = 0; i < N; ++i) {
-		const PVec3 xi = _particles[i].predPos;
-		const F32 rho_i = computeDensity(i);
-		const F32 C_i = std::max((rho_i / rho0) - 1.0f, 0.0f); // CRITICAL FIX: The Clamp
-
-		F32 sum_grad_Ci_sq = 0.0f;
-		PVec3 grad_Ci_i = make_pvec3(0.0f, 0.0f, 0.0f);
-
-		const auto& neigh = _neighborSearch.getNeighbors(i);
-		for (I32 j : neigh) {
-			if (i == j) continue;
-
-			const PVec3 rij = xi - _particles[j].predPos;
-			PVec3 gradW = calcLambdaDerivative(rij, h);
-
-			PVec3 grad_Ci_j = gradW * (-1.0f / rho0);
-			sum_grad_Ci_sq += dot(grad_Ci_j, grad_Ci_j);
-
-			grad_Ci_i += gradW * (1.0f / rho0);
-		}
-
-		// NOT WORKING WELL: Particles are sticking to the walls
-		// Ghost contributions to self-gradient (static mirrors, no per-ghost lambda term)
-		const std::vector<PVec3> ghostVecs = getGhostRelativeVectors(xi);
-		for (const PVec3& rghost : ghostVecs) {
-			const PVec3 gradW = calcLambdaDerivative(rghost, h);
-			grad_Ci_i += gradW * (1.0f / rho0);
-		}
-
-		sum_grad_Ci_sq += dot(grad_Ci_i, grad_Ci_i);
-		_lambda[i] = -C_i / (sum_grad_Ci_sq + eps);
-	}
-}
-
-// ------------------------------------------------------------
-// DeltaP computation
-// ------------------------------------------------------------
-
-void PBFluids::computeDeltaP()
-{
-	const I32 N = (I32)_particles.size();
-	const F32 h = _params.h;
-	const F32 rho0 = _params.rho0;
-
-	for (I32 i = 0; i < N; ++i) {
-		_deltaP[i] = make_pvec3(0.0f, 0.0f, 0.0f);
-	}
-
-	for (I32 i = 0; i < N; ++i) {
-		const PVec3 xi = _particles[i].predPos;
-		PVec3 dp = make_pvec3(0.0f, 0.0f, 0.0f);
-
-		// 1. Contributions from real fluid neighbors
-		const auto& neigh = _neighborSearch.getNeighbors(i);
-		for (I32 j : neigh) {
-			if (i == j) continue;
-			const PVec3 rij = xi - _particles[j].predPos;
-			const PVec3 gradW = calcLambdaDerivative(rij, h);
-
-			const F32 scorr = computeSCorr(rij);
-			const F32 s = (_lambda[i] + _lambda[j] + scorr);
-
-			dp += gradW * s;
-		}
-
-		// NOT WORKING WELL: Particles are sticking to the walls
-		// 2. Contributions from ghost particles (boundary repulsion)
-		const std::vector<PVec3> ghostVecs = getGhostRelativeVectors(xi);
-		for (const PVec3& ghost : ghostVecs) {
-			const PVec3 gradW = calcLambdaDerivative(ghost, h);
-
-			// 1. Ghosts are true mirrors. They share the exact same pressure (lambda) as particle i.
-			// Therefore, s = lambda_i + lambda_ghost = 2.0f * lambda_i.
-			// 2. We DO NOT apply scorr to boundary interactions to prevent unnatural wall-jitter.
-			const F32 s = 2.0f * _lambda[i];
-
-			// Treat the ghost as having the same mass as the particle
-			dp += gradW * s;
-		}
-
-		_deltaP[i] = dp * (1.0f / rho0);
-	}
-}
-
-void PBFluids::applyDeltaP()
-{
-	const I32 N = (I32)_particles.size();
-	for (I32 i = 0; i < N; ++i) {
-		_particles[i].predPos += _deltaP[i];
-	}
-}
-
-// ------------------------------------------------------------
-// XSPH viscosity
-// ------------------------------------------------------------
-
-void PBFluids::applyViscosityXSPH()
-{
-	const F32 h = _params.h;
-	const F32 c = _params.viscosity;
-	const I32 N = (I32)_particles.size();
-
-	if (!_params.enableViscosity) return;
-
-	std::vector<PVec3> newVelocities(N);
-
-	for (I32 i = 0; i < N; ++i) {
-		PVec3 v_i = _particles[i].vel;
-		PVec3 viscosityForce = make_pvec3(0.0f, 0.0f, 0.0f);
-
-		const auto& neigh = _neighborSearch.getNeighbors(i);
-		for (I32 j : neigh) {
-			if (i == j) continue;
-
-			PVec3 v_j = _particles[j].vel;
-
-			PVec3 rij = _particles[i].predPos - _particles[j].predPos;
-			F32 w = calcXSPHKernel(rij, h);
-
-			viscosityForce += (v_j - v_i) * w * (1.0f / _params.rho0);
-		}
-
-		newVelocities[i] = v_i + viscosityForce * c;
-	}
-
-	for (I32 i = 0; i < N; ++i) {
-		_particles[i].vel = newVelocities[i];
-	}
-}
-
-// ------------------------------------------------------------
-// Collisions
-// ------------------------------------------------------------
-
-void PBFluids::handleCollisions()
-{
-	for (auto& p : _particles) {
-		// X Axis
-		if (p.predPos.x < _minBound.x) {
-			p.predPos.x = _minBound.x;
-		}
-		else if (p.predPos.x > _maxBound.x) {
-			p.predPos.x = _maxBound.x;
-		}
-
-		// Y Axis
-		if (p.predPos.y < _minBound.y) {
-			p.predPos.y = _minBound.y;
-		}
-		else if (p.predPos.y > _maxBound.y) {
-			p.predPos.y = _maxBound.y;
-		}
-
-		// Z Axis
-		if (p.predPos.z < _minBound.z) {
-			p.predPos.z = _minBound.z;
-		}
-		else if (p.predPos.z > _maxBound.z) {
-			p.predPos.z = _maxBound.z;
-		}
-	}
-}
-
-// ------------------------------------------------------------
-// Finalize
-// ------------------------------------------------------------
-
-void PBFluids::updateVelocityFromPred()
-{
-	const F32 dt = _params.dt;
-	const F32 invDt = (dt > 0.0f) ? (1.0f / dt) : 0.0f;
-
-	for (auto& p : _particles) {
-		const bool collidedX = (p.predPos.x <= _minBound.x || p.predPos.x >= _maxBound.x);
-		const bool collidedY = (p.predPos.y <= _minBound.y || p.predPos.y >= _maxBound.y);
-		const bool collidedZ = (p.predPos.z <= _minBound.z || p.predPos.z >= _maxBound.z);
-
-		p.vel = (p.predPos - p.pos) * invDt;
-
-		if (collidedX) p.vel.x *= -_boundDamping;
-		if (collidedY) p.vel.y *= -_boundDamping;
-		if (collidedZ) p.vel.z *= -_boundDamping;
-	}
-}
-
-void PBFluids::commitPositions()
-{
-	for (auto& p : _particles) {
-		p.pos = p.predPos;
-	}
+    if (_particles.empty()) return;
+
+    const U32 N = _params.particleCount;
+
+    // Standard compute shader workgroup size (256 threads per group)
+    const U32 workgroupSize = 256;
+    const U32 numGroups = (N + workgroupSize - 1) / workgroupSize;
+    const U32 gridGroups = (_params.hashSize + workgroupSize - 1) / workgroupSize;
+
+    // Bind all buffers to their respective binding points
+    _uboConfig.bindTo(0);
+
+    _ssboParticles.bindTo(0);
+    _ssboSolver.bindTo(1);
+    _ssboHashGrid.bindTo(2);
+    _ssboOffsets.bindTo(3);
+
+    // XPBD Substepping Loop
+    for (U32 s = 0; s < _params.substepIterations; ++s) {
+
+        // 1. Predict & Hash
+        _csPredictAndHash.use();
+        _csPredictAndHash.dispatch(numGroups);
+        _csPredictAndHash.wait();
+
+        // 2. Bitonic Sort (Sorting the HashGridBuffer)
+        // Bitonic sort requires a power-of-two size
+        _csBitonicSort.use();
+        _csBitonicSort.setUint("particleCount", N);
+
+        for (U32 k = 2; k <= N; k <<= 1) {
+            for (U32 j = k >> 1; j > 0; j >>= 1) {
+                _csBitonicSort.setUint("k", k);
+                _csBitonicSort.setUint("j", j);
+                _csBitonicSort.dispatch(numGroups);
+                _csBitonicSort.wait();
+            }
+        }
+
+        // 3. Build Grid Offsets
+        _csBuildOffsets.use();
+
+        // Clear offsets first
+        _csBuildOffsets.setUint("clearMode", 1u);
+        _csBuildOffsets.dispatch(gridGroups);
+        _csBuildOffsets.wait();
+
+        // Build offsets
+        _csBuildOffsets.setUint("clearMode", 0u);
+        _csBuildOffsets.dispatch(numGroups);
+        _csBuildOffsets.wait();
+
+        // 4. Constraint Solving
+        for (U32 iter = 0; iter < _params.solverIterations; ++iter) {
+
+            _csComputeLambdas.use();
+            _csComputeLambdas.dispatch(numGroups);
+            _csComputeLambdas.wait();
+
+            _csComputeDeltaP.use();
+            _csComputeDeltaP.dispatch(numGroups);
+            _csComputeDeltaP.wait();
+        }
+
+        // 5. Integrate & Handle Collisions
+        _csIntegrate.use();
+        _csIntegrate.dispatch(numGroups);
+        _csIntegrate.wait();
+    }
+
+    // ------------------------------------------------------------
+    // GPU to CPU Readback (For Polyscope Rendering)
+    // ------------------------------------------------------------
+    Particle* mappedData = _ssboParticles.map(GL_READ_ONLY);
+    if (mappedData) {
+        // Copy the updated pos/vel data back into the CPU vector
+        std::copy(mappedData, mappedData + N, _particles.begin());
+        _ssboParticles.unmap();
+    }
 }

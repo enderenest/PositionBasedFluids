@@ -14,12 +14,12 @@ struct FluidConfig {
 	// PBF / SPH kernels
 	F32 h = 0.20f;								// smoothing radius: h/spacing = 2.0 is the minimum stable ratio for PBF
 	F32 rho0 = 1000.0f;							// rest density calibrated to natural packing: ~1024 for m=1, h=0.2, spacing=0.1
-	I32 solverIterations = 3;					// PBF needs 5-10 iterations to converge
-	I32 substepIterations = 2;					// smaller substeps improve stability
+	U32 solverIterations = 3;					// PBF needs 5-10 iterations to converge
+	U32 substepIterations = 2;					// smaller substeps improve stability
 	F32 eps = 0.0001f;							// constraint regularization
 
 	// Spawn configuration
-	I32  particleCount = 1024;					// 64^3 cube = reasonable for CPU testing
+	U32  particleCount = 1024;					// 64^3 cube = reasonable for CPU testing
 	PVec3 spawnMin = { 0.25f, 0.25f, 0.25f };	// centered region
 	PVec3 spawnMax = { 1.75f, 1.75f, 1.75f };	// 2 unit cube
 	bool spawnRandom = false;					// grid spawn: ensures uniform spacing, no initial overlaps

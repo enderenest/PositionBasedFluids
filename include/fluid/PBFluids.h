@@ -1,12 +1,46 @@
 #ifndef PBFLUIDS_H
 #define PBFLUIDS_H
 
-#include <vector>
+#include "core/config.h"
 #include "core/Types.h"
-#include "core/Config.h"
 #include "fluid/Particle.h"
-#include "fluid/Kernels.h"
 #include "fluid/NeighborSearch.h"
+#include "fluid/Kernels.h"   
+#include "opengl/SSBO.h"
+#include "opengl/UBO.h"
+#include "opengl/ComputeShader.h"
+
+#include <vector>
+#include <memory>
+
+
+// ============================================================
+// UBO Memory Layout (std140 padded)
+// ============================================================
+struct FluidConfigUBO {
+    // 16 byte Vec4 parameters
+    PVec4 boundsMin;        // xyz: min bound, w: padding
+    PVec4 boundsMax;        // xyz: max bound, w: padding
+    PVec4 gravity_dt;       // xyz: gravity, w: subDt
+
+    // 16 byte Float parameters
+    F32 h;
+    F32 rho0;
+    F32 eps;
+    F32 wq;
+
+    // 16 byte Float parameters
+    F32 kCorr;
+    F32 nCorr;
+    F32 viscosity;
+    F32 boundDamping;
+
+    // 16 byte UInt parameters
+    U32 hashSize;
+    U32 particleCount;
+    U32 pad1;
+    U32 pad2;
+};
 
 
 // ============================================================
@@ -101,6 +135,26 @@ private:
 
     // Derived precomputed constants
     F32 _wq;
+
+    // ----------------------------
+    // GPU MEMORY BUFFERS
+    // ----------------------------
+    UBO<FluidConfigUBO> _uboConfig;
+
+    SSBO<Particle>   _ssboParticles; // Binding 0
+    SSBO<PVec4>      _ssboSolver;    // Binding 1 (PredPos_Lambda, DeltaP_Rho)
+    SSBO<UVec2>        _ssboHashGrid;  // Binding 2 (Hash pairs)
+    SSBO<IVec2>        _ssboOffsets;   // Binding 3 (Cell start/end indices)
+
+    // ----------------------------
+    // COMPUTE SHADER PIPELINE
+    // ----------------------------
+    ComputeShader _csPredictAndHash;
+    ComputeShader _csBitonicSort;
+    ComputeShader _csBuildOffsets;
+    ComputeShader _csComputeLambdas;
+    ComputeShader _csComputeDeltaP;
+    ComputeShader _csIntegrate;
 };
 
 #endif

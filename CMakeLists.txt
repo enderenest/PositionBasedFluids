@@ -42,12 +42,23 @@ add_subdirectory(thirdparty/raudio)				#audio
 # add_subdirectory(thirdparty/glm)				#math / use inside polyscope for now, it's header only so it doesn't matter
 # add_subdirectory(thirdparty/imgui-docking)	#ui / use inside polyscope for now, it's header only so it doesn't matter
 add_subdirectory(thirdparty/gl2d)				#rendering
-add_subdirectory(thirdparty/polyscope) 		    #viewer for debugging meshes and particles
+# polyscope removed — using direct GLFW/OpenGL + ImGui for max performance
 
 
-# MY_SOURCES is defined to be a list of all the source files for my game 
+# MY_SOURCES is defined to be a list of all the source files for my game
 # DON'T ADD THE SOURCES BY HAND, they are already added with this macro
 file(GLOB_RECURSE MY_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+
+# ImGui (using sources bundled with polyscope deps)
+set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/polyscope/deps/imgui/imgui")
+set(IMGUI_SOURCES
+    "${IMGUI_DIR}/imgui.cpp"
+    "${IMGUI_DIR}/imgui_draw.cpp"
+    "${IMGUI_DIR}/imgui_tables.cpp"
+    "${IMGUI_DIR}/imgui_widgets.cpp"
+    "${IMGUI_DIR}/backends/imgui_impl_glfw.cpp"
+    "${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp"
+)
 
 
 add_executable("${CMAKE_PROJECT_NAME}")
@@ -55,7 +66,9 @@ add_executable("${CMAKE_PROJECT_NAME}")
 set_property(TARGET "${CMAKE_PROJECT_NAME}" PROPERTY CXX_STANDARD 17)
 
 
-target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC GLFW_INCLUDE_NONE=1) 
+target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC GLFW_INCLUDE_NONE=1)
+target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC IMGUI_IMPL_OPENGL_LOADER_GLAD=1)
+target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC GLM_ENABLE_EXPERIMENTAL=1) 
 
 if(PRODUCTION_BUILD)
 	# setup the ASSETS_PATH macro to be in the root folder of your exe
@@ -70,7 +83,7 @@ else()
 
 endif()
 
-target_sources("${CMAKE_PROJECT_NAME}" PRIVATE ${MY_SOURCES}  "include/core/Types.h")
+target_sources("${CMAKE_PROJECT_NAME}" PRIVATE ${MY_SOURCES} ${IMGUI_SOURCES} "include/core/Types.h")
 
 
 if(MSVC) # If using the VS compiler...
@@ -87,10 +100,13 @@ endif()
 
 target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC  "${CMAKE_CURRENT_SOURCE_DIR}/include/")
 target_include_directories("${CMAKE_PROJECT_NAME}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/eigen")
+target_include_directories("${CMAKE_PROJECT_NAME}" PRIVATE "${IMGUI_DIR}")
+target_include_directories("${CMAKE_PROJECT_NAME}" PRIVATE "${IMGUI_DIR}/backends")
+target_include_directories("${CMAKE_PROJECT_NAME}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/polyscope/deps/glm")
 
 
 
-target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glfw 
-	glad stb_image stb_truetype gl2d raudio enet polyscope)
+target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glfw
+	glad stb_image stb_truetype raudio enet)
 
 

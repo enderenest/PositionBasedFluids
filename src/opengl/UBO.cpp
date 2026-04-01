@@ -32,3 +32,8 @@ template<typename T>
 GLuint UBO<T>::getID() const {
     return _id;
 }
+
+// Explicit instantiation for FluidConfigUBO
+#include "fluid/PBFluids.h"
+
+template class UBO<FluidConfigUBO>;

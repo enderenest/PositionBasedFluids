@@ -58,6 +58,11 @@ layout(std430, binding = 3) buffer CellOffsetBuffer {
 };
 
 // =========================================================================
+// Uniforms
+// =========================================================================
+uniform uint enableVorticity;
+
+// =========================================================================
 // KERNEL & HASH FUNCTIONS
 // =========================================================================
 float calcPoly6Kernel(vec3 r, float h) {
@@ -70,9 +75,20 @@ float calcPoly6Kernel(vec3 r, float h) {
     float h9 = h4 * h4 * h;
     float diff = h2 - r2;
     float diff3 = diff * diff * diff;
-    
+
     float coeff = 315.0 / (64.0 * PI);
     return (coeff / h9) * diff3;
+}
+
+vec3 calcGradSpikyPow3Kernel(vec3 r, float h) {
+    float dist = length(r);
+    if (dist > h || dist < 1e-5) return vec3(0.0);
+
+    float coeff = 45.0 / PI;
+    float h6 = h * h * h * h * h * h;
+    float diff = h - dist;
+
+    return r * (-diff * diff * (coeff / h6) / dist);
 }
 
 uint getGridHash(ivec3 cell) {
@@ -97,12 +113,17 @@ void main() {
     float h = ubo.h;
     
     // =========================================================================
-    // XSPH VISCOSITY (Optional)
+    // XSPH VISCOSITY + CURL (piggybacked neighbor loop)
     // =========================================================================
     vec3 vel = oldVel;
-    
-    if (ubo.enableViscosity == 1u) {
+
+    bool doViscosity = (ubo.enableViscosity == 1u);
+    bool doVorticity = (enableVorticity == 1u);
+
+    if (doViscosity || doVorticity) {
         vec3 viscosityForce = vec3(0.0);
+        vec3 curl = vec3(0.0);
+        float invRho0 = 1.0 / ubo.rho0;
         ivec3 cellCoord = ivec3(floor(predPos / h));
 
         for (int z = -1; z <= 1; z++) {
@@ -111,27 +132,34 @@ void main() {
                     ivec3 neighborCell = cellCoord + ivec3(x, y, z);
                     uint neighborHash = getGridHash(neighborCell);
                     ivec2 startEnd = offsets[neighborHash];
-                    
+
                     if (startEnd.x != -1) {
                         for (int k = startEnd.x; k < startEnd.y; k++) {
                             uint j = hashGrid[k].y;
                             if (id == j) continue;
-                            
+
                             vec3 xj = solver[j].predPos_lambda.xyz;
-                            vec3 vj = particles[j].vel.xyz; // Read neighbor's old velocity
-                            
+                            vec3 vj = particles[j].vel.xyz;
                             vec3 rij = predPos - xj;
-                            float w = calcPoly6Kernel(rij, h);
-                            
-                            viscosityForce += (vj - oldVel) * w * (1.0 / ubo.rho0);
+                            vec3 vij = vj - oldVel;
+
+                            if (doViscosity) {
+                                float w = calcPoly6Kernel(rij, h);
+                                viscosityForce += vij * w * invRho0;
+                            }
+
+                            if (doVorticity) {
+                                vec3 gradW = calcGradSpikyPow3Kernel(rij, h);
+                                curl += cross(vij, gradW);
+                            }
                         }
                     }
                 }
             }
         }
-        
-        // Apply viscosity to the working velocity
-        vel += viscosityForce * ubo.viscosity;
+
+        if (doViscosity) vel += viscosityForce * ubo.viscosity;
+        if (doVorticity) solver[id].deltaP_rho.xyz = curl * invRho0;
     }
 
     // =========================================================================

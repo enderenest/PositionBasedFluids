@@ -47,12 +47,7 @@ template<typename T>
 T* SSBO<T>::map(GLbitfield access) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, _id);
     return static_cast<T*>(
-        glMapBufferRange(
-            GL_SHADER_STORAGE_BUFFER,
-            0,
-            _count * sizeof(T),
-            access
-        )
+        glMapBuffer(GL_SHADER_STORAGE_BUFFER, access)
         );
 }
 
@@ -70,3 +65,14 @@ template<typename T>
 GLuint SSBO<T>::getID() const {
     return _id;
 }
+
+
+// Explicit instantiations for our types
+#include "fluid/Particle.h"
+#include "core/Types.h" 
+
+template class SSBO<Particle>;
+template class SSBO<GpuParticle>;
+template class SSBO<PVec4>;
+template class SSBO<UVec2>;
+template class SSBO<IVec2>;

@@ -73,9 +73,10 @@ std::string ComputeShader::loadShaderSource(const char* filePath) const {
 void ComputeShader::checkCompileErrors(GLuint object, const std::string& type, const char* filename) const
 {
 	GLint success;
-	glGetShaderiv(object,
-		type[0] == 'P' ? GL_LINK_STATUS : GL_COMPILE_STATUS,
-		&success);
+	if (type[0] == 'P')
+		glGetProgramiv(object, GL_LINK_STATUS, &success);
+	else
+		glGetShaderiv(object, GL_COMPILE_STATUS, &success);
 	if (!success) {
 		char infoLog[1024];
 		if (type[0] == 'P') glGetProgramInfoLog(object, 1024, NULL, infoLog);

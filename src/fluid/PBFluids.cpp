@@ -15,12 +15,13 @@ PBFluids::PBFluids(const FluidConfig& p)
     , _ssboSolver(0)
     , _ssboHashGrid(0)
     , _ssboOffsets(0)
-    , _csPredictAndHash("resources/shaders/compute/CS_PredictAndHash.glsl")
-    , _csBitonicSort("resources/shaders/compute/CS_BitonicSort.glsl")
-    , _csBuildOffsets("resources/shaders/compute/CS_BuildOffsets.glsl")
-    , _csComputeLambdas("resources/shaders/compute/CS_ComputeLambdas.glsl")
-    , _csComputeDeltaP("resources/shaders/compute/CS_ComputeDeltaP.glsl")
-    , _csIntegrate("resources/shaders/compute/CS_Integrate.glsl")
+    , _csPredictAndHash(RESOURCES_PATH "shaders/compute/CS_PredictAndHash.glsl")
+    , _csBitonicSort(RESOURCES_PATH "shaders/compute/CS_BitonicSort.glsl")
+    , _csBuildOffsets(RESOURCES_PATH "shaders/compute/CS_BuildOffsets.glsl")
+    , _csComputeLambdas(RESOURCES_PATH "shaders/compute/CS_ComputeLambdas.glsl")
+    , _csComputeDeltaP(RESOURCES_PATH "shaders/compute/CS_ComputeDeltaP.glsl")
+    , _csIntegrate(RESOURCES_PATH "shaders/compute/CS_Integrate.glsl")
+    , _csVorticity(RESOURCES_PATH "shaders/compute/CS_VorticityConfinement.glsl")
 {
     setParams(p);
 }
@@ -52,8 +53,8 @@ void PBFluids::setParams(const FluidConfig& p)
 
     uboData.hashSize = _params.hashSize;
     uboData.particleCount = _params.particleCount;
-    uboData.pad1 = 0u;
-    uboData.pad2 = 0u;
+    uboData.enableSCorr = _params.enableSCorr ? 1u : 0u;
+    uboData.enableViscosity = _params.enableViscosity ? 1u : 0u;
 
     _uboConfig.upload(uboData);
 }
@@ -67,8 +68,13 @@ void PBFluids::setParticles(const std::vector<Particle>& particles)
     _params.particleCount = (U32)N;
     setParams(_params);
 
-    // Allocate and upload initial particle data to SSBO 0
-    _ssboParticles.upload(_particles);
+    // Convert CPU particles to GPU layout and upload to SSBO 0
+    std::vector<GpuParticle> gpuData(N);
+    for (size_t i = 0; i < N; ++i) {
+        gpuData[i].pos = { _particles[i].pos.x, _particles[i].pos.y, _particles[i].pos.z, 0.0f };
+        gpuData[i].vel = { _particles[i].vel.x, _particles[i].vel.y, _particles[i].vel.z, 0.0f };
+    }
+    _ssboParticles.upload(gpuData);
 
     // Allocate volatile solver buffers
     std::vector<PVec4> dummySolver(N * 2); // 2 vec4s per particle (predPos_lambda, deltaP_rho)
@@ -165,19 +171,22 @@ void PBFluids::step()
             _csComputeDeltaP.wait();
         }
 
-        // 5. Integrate & Handle Collisions
+        // 5. Integrate & Handle Collisions (also computes curl if vorticity enabled)
         _csIntegrate.use();
+        _csIntegrate.setUint("enableVorticity", _params.enableVorticity ? 1u : 0u);
         _csIntegrate.dispatch(numGroups);
         _csIntegrate.wait();
     }
 
-    // ------------------------------------------------------------
-    // GPU to CPU Readback (For Polyscope Rendering)
-    // ------------------------------------------------------------
-    Particle* mappedData = _ssboParticles.map(GL_READ_ONLY);
-    if (mappedData) {
-        // Copy the updated pos/vel data back into the CPU vector
-        std::copy(mappedData, mappedData + N, _particles.begin());
-        _ssboParticles.unmap();
+    // 6. Vorticity Confinement — pass 1 only (curl already computed in CS_Integrate)
+    if (_params.enableVorticity) {
+        _csVorticity.use();
+        _csVorticity.setFloat("vorticityEpsilon", _params.vorticityEpsilon);
+        _csVorticity.setUint("pass", 1u);
+        _csVorticity.dispatch(numGroups);
+        _csVorticity.wait();
     }
+
+    // SSBO stays on GPU — vertex shader reads directly from binding 0.
+    // No CPU readback needed.
 }

@@ -1,305 +1,443 @@
-// main.cpp
+// main.cpp â€” Standalone GLFW/OpenGL viewer with GPU-direct instanced rendering
 //
-// Fixes applied (ONLY problematic parts):
-// 1) PBFluids must be constructed / configured with FluidConfig, not Config.
-// 2) When pointRadius OR bounds change, we must re-apply BOTH:
-//      - collision padding
-//      - padded bounds
-//      - boundary mesh vertices
-//    using ONE helper function, so we never forget order.
-// 3) When parameters change, call fluid.setParams(cfg.fluid) (not cfg).
-// 4) If pointRadius changes we update Polyscope point radius, and also update bounds padding.
-// 5) Keep code minimal; no architecture changes.
+// Performance architecture:
+//   Compute shaders write particle data to SSBO binding 0
+//   Vertex shader reads directly from that SSBO via gl_InstanceID
+//   ZERO CPU readback â€” data never leaves the GPU
 
-#include <vector>
-#include <random>
-#include <algorithm>
-#include <cstdint>
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
 
 #include "core/Config.h"
 #include "fluid/PBFluids.h"
 #include "fluid/Particle.h"
 
-#include "polyscope/polyscope.h"
-#include "polyscope/point_cloud.h"
-#include "polyscope/surface_mesh.h"
+#include <vector>
+#include <random>
+#include <algorithm>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cmath>
 
-#include "imgui.h"
+// ===================================================================
+// Window / Camera state
+// ===================================================================
+static int   g_winW = 1600, g_winH = 900;
+static float g_camYaw   = 0.45f;
+static float g_camPitch = 0.35f;
+static float g_camDist  = 4.5f;
+static glm::vec3 g_camTarget(1.0f, 1.0f, 1.0f);
 
-// ---------------------------
-// Helpers: random + spawn
-// ---------------------------
-
-static float frand01(std::mt19937& rng) {
-    static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    return dist(rng);
+static void framebufferCB(GLFWwindow*, int w, int h) {
+    g_winW = w; g_winH = h;
+    glViewport(0, 0, w, h);
 }
 
-static std::vector<Particle> spawnParticlesFromConfig(const FluidConfig& c) {
-    std::vector<Particle> ps;
-    ps.reserve((size_t)std::max(0, c.particleCount));
+static void scrollCB(GLFWwindow*, double, double yoff) {
+    if (ImGui::GetIO().WantCaptureMouse) return;
+    g_camDist -= (float)yoff * 0.3f;
+    g_camDist = glm::clamp(g_camDist, 0.3f, 30.0f);
+}
 
+static glm::mat4 viewMatrix() {
+    float cx = g_camDist * cosf(g_camPitch) * sinf(g_camYaw);
+    float cy = g_camDist * sinf(g_camPitch);
+    float cz = g_camDist * cosf(g_camPitch) * cosf(g_camYaw);
+    return glm::lookAt(g_camTarget + glm::vec3(cx, cy, cz), g_camTarget, {0, 1, 0});
+}
+
+// ===================================================================
+// Shader helpers
+// ===================================================================
+static std::string readFile(const char* path) {
+    std::ifstream f(path);
+    if (!f.is_open()) { std::cerr << "Cannot open: " << path << "\n"; return ""; }
+    std::stringstream ss; ss << f.rdbuf(); return ss.str();
+}
+
+static GLuint compileShader(GLenum type, const char* src, const char* label) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) { char log[1024]; glGetShaderInfoLog(s, 1024, nullptr, log); std::cerr << label << ":\n" << log << "\n"; }
+    return s;
+}
+
+static GLuint linkProgram(GLuint vs, GLuint fs) {
+    GLuint p = glCreateProgram();
+    glAttachShader(p, vs); glAttachShader(p, fs);
+    glLinkProgram(p);
+    GLint ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) { char log[1024]; glGetProgramInfoLog(p, 1024, nullptr, log); std::cerr << "Link:\n" << log << "\n"; }
+    glDeleteShader(vs); glDeleteShader(fs);
+    return p;
+}
+
+static GLuint loadProgram(const char* vsPath, const char* fsPath) {
+    std::string vsSrc = readFile(vsPath), fsSrc = readFile(fsPath);
+    return linkProgram(
+        compileShader(GL_VERTEX_SHADER,   vsSrc.c_str(), vsPath),
+        compileShader(GL_FRAGMENT_SHADER, fsSrc.c_str(), fsPath));
+}
+
+static GLuint createInlineProgram(const char* vsSrc, const char* fsSrc) {
+    return linkProgram(
+        compileShader(GL_VERTEX_SHADER,   vsSrc, "inline-vs"),
+        compileShader(GL_FRAGMENT_SHADER, fsSrc, "inline-fs"));
+}
+
+// ===================================================================
+// Embedded line shaders (boundary box)
+// ===================================================================
+static const char* lineVS = R"(
+#version 430 core
+layout(location=0) in vec3 aPos;
+uniform mat4 VP;
+void main() { gl_Position = VP * vec4(aPos, 1.0); }
+)";
+
+static const char* lineFS = R"(
+#version 430 core
+uniform vec3 color;
+out vec4 FragColor;
+void main() { FragColor = vec4(color, 1.0); }
+)";
+
+// ===================================================================
+// Boundary box geometry (12 edges = 24 vertices)
+// ===================================================================
+static void fillBoxVerts(float* out, const PVec3& mn, const PVec3& mx) {
+    // 12 edges, each 2 vertices, each 3 floats
+    float v[] = {
+        mn.x,mn.y,mn.z, mx.x,mn.y,mn.z,  mx.x,mn.y,mn.z, mx.x,mx.y,mn.z,
+        mx.x,mx.y,mn.z, mn.x,mx.y,mn.z,  mn.x,mx.y,mn.z, mn.x,mn.y,mn.z,
+        mn.x,mn.y,mx.z, mx.x,mn.y,mx.z,  mx.x,mn.y,mx.z, mx.x,mx.y,mx.z,
+        mx.x,mx.y,mx.z, mn.x,mx.y,mx.z,  mn.x,mx.y,mx.z, mn.x,mn.y,mx.z,
+        mn.x,mn.y,mn.z, mn.x,mn.y,mx.z,  mx.x,mn.y,mn.z, mx.x,mn.y,mx.z,
+        mx.x,mx.y,mn.z, mx.x,mx.y,mx.z,  mn.x,mx.y,mn.z, mn.x,mx.y,mx.z,
+    };
+    std::copy(v, v + 72, out);
+}
+
+// ===================================================================
+// Particle spawning
+// ===================================================================
+static float frand01(std::mt19937& rng) {
+    static std::uniform_real_distribution<float> d(0.f, 1.f);
+    return d(rng);
+}
+
+static std::vector<Particle> spawnParticles(const FluidConfig& c) {
+    std::vector<Particle> ps;
+    ps.reserve(c.particleCount);
     std::mt19937 rng(1337);
 
     if (c.spawnRandom) {
-		PVec3 pad = make_pvec3(c.spacing, c.spacing, c.spacing);
-
-        PVec3 minBound = c.spawnMin + pad;
-		PVec3 maxBound = c.spawnMax - pad;
-		
-        for (I32 i = 0; i < c.particleCount; ++i) {
-            PVec3 p{
-              minBound.x + (maxBound.x - minBound.x) * frand01(rng),
-              minBound.y + (maxBound.y - minBound.y) * frand01(rng),
-              minBound.z + (maxBound.z - minBound.z) * frand01(rng)
-            };
-
+        PVec3 pad{c.spacing, c.spacing, c.spacing};
+        PVec3 lo = c.spawnMin + pad, hi = c.spawnMax - pad;
+        for (U32 i = 0; i < c.particleCount; ++i) {
             Particle pt{};
-            pt.pos = p;
-            pt.predPos = p;
+            pt.pos = { lo.x + (hi.x-lo.x)*frand01(rng),
+                       lo.y + (hi.y-lo.y)*frand01(rng),
+                       lo.z + (hi.z-lo.z)*frand01(rng) };
+            pt.predPos = pt.pos;
             pt.vel = c.initialVelocity;
-
             ps.push_back(pt);
         }
-    }
-    else {
-        const float dx = std::max(1e-6f, c.spacing);
-
-        for (float z = c.spawnMin.z; z <= c.spawnMax.z && (I32)ps.size() < c.particleCount; z += dx) {
-            for (float y = c.spawnMin.y; y <= c.spawnMax.y && (I32)ps.size() < c.particleCount; y += dx) {
-                for (float x = c.spawnMin.x; x <= c.spawnMax.x && (I32)ps.size() < c.particleCount; x += dx) {
-                    Particle pt{};
-                    pt.pos = { x, y, z };
-                    pt.predPos = pt.pos;
-                    pt.vel = c.initialVelocity;
+    } else {
+        float dx = std::max(1e-6f, c.spacing);
+        for (float z = c.spawnMin.z; z <= c.spawnMax.z && (U32)ps.size() < c.particleCount; z += dx)
+            for (float y = c.spawnMin.y; y <= c.spawnMax.y && (U32)ps.size() < c.particleCount; y += dx)
+                for (float x = c.spawnMin.x; x <= c.spawnMax.x && (U32)ps.size() < c.particleCount; x += dx) {
+                    Particle pt{}; pt.pos = {x,y,z}; pt.predPos = pt.pos; pt.vel = c.initialVelocity;
                     ps.push_back(pt);
                 }
-            }
-        }
     }
-
     return ps;
 }
 
-static std::vector<std::array<double, 3>> toPSPoints(const std::vector<Particle>& ps) {
-    std::vector<std::array<double, 3>> pts;
-    pts.resize(ps.size());
-    for (size_t i = 0; i < ps.size(); ++i) {
-        pts[i] = { (double)ps[i].pos.x, (double)ps[i].pos.y, (double)ps[i].pos.z };
-    }
-    return pts;
-}
-
-// ---------------------------
-// Helpers: boundary box mesh
-// ---------------------------
-
-static std::vector<std::array<double, 3>> makeBoxVerts(const PVec3& mn, const PVec3& mx) {
-    return {
-      { (double)mn.x, (double)mn.y, (double)mn.z }, // 0
-      { (double)mx.x, (double)mn.y, (double)mn.z }, // 1
-      { (double)mx.x, (double)mx.y, (double)mn.z }, // 2
-      { (double)mn.x, (double)mx.y, (double)mn.z }, // 3
-      { (double)mn.x, (double)mn.y, (double)mx.z }, // 4
-      { (double)mx.x, (double)mn.y, (double)mx.z }, // 5
-      { (double)mx.x, (double)mx.y, (double)mx.z }, // 6
-      { (double)mn.x, (double)mx.y, (double)mx.z }  // 7
-    };
-}
-
-static std::vector<std::array<size_t, 3>> makeBoxFaces() {
-    return {
-        {0, 1, 2}, {0, 2, 3},
-        {4, 6, 5}, {4, 7, 6},
-        {0, 5, 1}, {0, 4, 5},
-        {3, 2, 6}, {3, 6, 7},
-        {0, 3, 7}, {0, 7, 4},
-        {1, 5, 6}, {1, 6, 2}
-    };
-}
-
-// ---------------------------
-// Main
-// ---------------------------
-
+// ===================================================================
+// MAIN
+// ===================================================================
 int main() {
+    // ------ GLFW / OpenGL init -----------------------------------
+    glfwInit();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
+    GLFWwindow* window = glfwCreateWindow(g_winW, g_winH, "HybridSim", nullptr, nullptr);
+    if (!window) { std::cerr << "GLFW window failed\n"; glfwTerminate(); return -1; }
+    glfwMakeContextCurrent(window);
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) { std::cerr << "GLAD failed\n"; return -1; }
+
+    glfwSwapInterval(0);                       // uncapped FPS
+    glfwSetFramebufferSizeCallback(window, framebufferCB);
+    glfwSetScrollCallback(window, scrollCB);
+    glViewport(0, 0, g_winW, g_winH);
+
+    // ------ ImGui init -------------------------------------------
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 430");
+    ImGui::StyleColorsDark();
+    ImGui::GetStyle().WindowRounding = 4.0f;
+
+    // ------ Simulation -------------------------------------------
     Config cfg{};
-
     PBFluids fluid(cfg.fluid);
-    fluid.setParams(cfg.fluid);
-    fluid.setParticles(spawnParticlesFromConfig(cfg.fluid));
+    fluid.setParticles(spawnParticles(cfg.fluid));
+    fluid.setCollisionPadding(0.0f);
 
-    // If you implemented padding inside PBFluids, set it once initially.
-    fluid.setCollisionPadding(cfg.viewer.pointRadius);
+    // ------ Particle shader (reads SSBO binding 0) ---------------
+    GLuint particleProg = loadProgram(
+        RESOURCES_PATH "shaders/graphics/VS_Particle.glsl",
+        RESOURCES_PATH "shaders/graphics/FS_Particle.glsl");
+    GLuint emptyVAO;
+    glGenVertexArrays(1, &emptyVAO);
 
-    // Polyscope init
-    polyscope::init();
-    polyscope::view::setUpDir(polyscope::UpDir::YUp);
-    polyscope::options::automaticallyComputeSceneExtents = true;
-    polyscope::options::groundPlaneEnabled = false;
+    // ------ Line shader (boundary box) ---------------------------
+    GLuint lineProg = createInlineProgram(lineVS, lineFS);
 
-    // Point cloud
-    auto pts = toPSPoints(fluid.particles());
-    polyscope::PointCloud* psCloud = polyscope::registerPointCloud("PBF Particles", pts);
-    psCloud->setPointRadius(cfg.viewer.pointRadius, false);
+    GLuint boxVAO, boxVBO;
+    glGenVertexArrays(1, &boxVAO);
+    glGenBuffers(1, &boxVBO);
+    glBindVertexArray(boxVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, boxVBO);
+    glBufferData(GL_ARRAY_BUFFER, 72 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glBindVertexArray(0);
 
-    // Boundary box
-    auto boxVerts = makeBoxVerts(cfg.fluid.boundsMin, cfg.fluid.boundsMax);
-    auto boxFaces = makeBoxFaces();
-    polyscope::SurfaceMesh* psBox = polyscope::registerSurfaceMesh("Boundary Box", boxVerts, boxFaces);
-    psBox->setTransparency(0.65);
-    psBox->setSurfaceColor({ 0.65, 0.85, 1.0 });
-    psBox->setSmoothShade(false);
+    // Upload initial box
+    float boxData[72];
+    fillBoxVerts(boxData, cfg.fluid.boundsMin, cfg.fluid.boundsMax);
+    glBindBuffer(GL_ARRAY_BUFFER, boxVBO);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(boxData), boxData);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // Runtime controls
-    static bool paused = false;
-    static bool stepOnce = false;
-    static bool respawnRequested = false;
+    // Center camera on bounds
+    g_camTarget = glm::vec3(
+        (cfg.fluid.boundsMin.x + cfg.fluid.boundsMax.x) * 0.5f,
+        (cfg.fluid.boundsMin.y + cfg.fluid.boundsMax.y) * 0.5f,
+        (cfg.fluid.boundsMin.z + cfg.fluid.boundsMax.z) * 0.5f);
 
-    auto applyBoundsAndBox = [&]() {
-        // re-apply collision padding (viewer radius)
-        fluid.setCollisionPadding(cfg.viewer.pointRadius);
+    // ------ State ------------------------------------------------
+    bool  paused       = false;
+    bool  stepOnce     = false;
+    bool  respawn      = false;
+    float pointSize    = 8.0f;
+    bool  rightDown    = false;
+    bool  midDown      = false;
+    double lastRX = 0, lastRY = 0, lastMX = 0, lastMY = 0;
 
-        // setBounds will internally shrink bounds by padding (in your PBFluids implementation)
-        fluid.setBounds(cfg.fluid.boundsMin, cfg.fluid.boundsMax, cfg.fluid.boundDamping);
+    // FPS counter
+    double fpsTime = glfwGetTime();
+    int    frames  = 0, fps = 0;
 
-        // update GLASS mesh (visual bounds) to match cfg bounds
-        boxVerts = makeBoxVerts(cfg.fluid.boundsMin, cfg.fluid.boundsMax);
-        psBox->updateVertexPositions(boxVerts);
-        };
+    // =================================================================
+    // RENDER LOOP
+    // =================================================================
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
 
-    // Apply once so bounds are correct on startup (especially if PBFluids uses padding)
-    applyBoundsAndBox();
+        // FPS
+        double now = glfwGetTime();
+        frames++;
+        if (now - fpsTime >= 1.0) { fps = frames; frames = 0; fpsTime = now; }
 
-    polyscope::state::userCallback = [&]() {
+        // ESC to close
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(window, true);
 
-        ImGui::PushItemWidth(260.0f);
+        // ---- Orbit camera (right drag) --------------------------
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS && !ImGui::GetIO().WantCaptureMouse) {
+            double mx, my; glfwGetCursorPos(window, &mx, &my);
+            if (!rightDown) { rightDown = true; lastRX = mx; lastRY = my; }
+            g_camYaw   += (float)(mx - lastRX) * 0.005f;
+            g_camPitch += (float)(my - lastRY) * 0.005f;
+            g_camPitch  = glm::clamp(g_camPitch, -1.5f, 1.5f);
+            lastRX = mx; lastRY = my;
+        } else { rightDown = false; }
 
-        ImGui::Text("CPU PBF Prototype");
+        // ---- Pan camera (middle drag) ---------------------------
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS && !ImGui::GetIO().WantCaptureMouse) {
+            double mx, my; glfwGetCursorPos(window, &mx, &my);
+            if (!midDown) { midDown = true; lastMX = mx; lastMY = my; }
+            glm::mat4 V = viewMatrix();
+            glm::vec3 right(V[0][0], V[1][0], V[2][0]);
+            glm::vec3 up   (V[0][1], V[1][1], V[2][1]);
+            float speed = g_camDist * 0.002f;
+            g_camTarget += (-(float)(mx - lastMX) * right + (float)(my - lastMY) * up) * speed;
+            lastMX = mx; lastMY = my;
+        } else { midDown = false; }
+
+        // ---- ImGui frame ----------------------------------------
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::Text("FPS: %d  |  Particles: %u", fps, cfg.fluid.particleCount);
         ImGui::Separator();
 
         if (ImGui::Checkbox("Paused", &paused)) {}
         ImGui::SameLine();
-        if (ImGui::Button("Step Once")) stepOnce = true;
+        if (ImGui::Button("Step"))    stepOnce = true;
         ImGui::SameLine();
-        if (ImGui::Button("Respawn")) respawnRequested = true;
+        if (ImGui::Button("Respawn")) respawn  = true;
 
-        // Viewer
+        ImGui::Separator(); ImGui::Text("Rendering");
+        ImGui::SliderFloat("Point Size (px)", &pointSize, 1.0f, 40.0f);
+
+        ImGui::Separator(); ImGui::Text("Time & Forces");
+        bool solverDirty = false;
+        solverDirty |= ImGui::SliderFloat("dt",      &cfg.fluid.dt, 1.f/240.f, 1.f/30.f);
+        solverDirty |= ImGui::SliderFloat3("gravity", &cfg.fluid.gravity.x, -30.f, 30.f);
+
+        ImGui::Separator(); ImGui::Text("PBF Params");
+        solverDirty |= ImGui::SliderFloat("h",    &cfg.fluid.h,    0.01f, 0.30f);
+        solverDirty |= ImGui::SliderFloat("rho0", &cfg.fluid.rho0, 100.f, 3000.f);
+        { int v = (int)cfg.fluid.solverIterations;
+          if (ImGui::SliderInt("solver iters", &v, 1, 12)) { cfg.fluid.solverIterations = (U32)v; solverDirty = true; } }
+        { int v = (int)cfg.fluid.substepIterations;
+          if (ImGui::SliderInt("substeps",     &v, 1, 5))  { cfg.fluid.substepIterations = (U32)v; solverDirty = true; } }
+        solverDirty |= ImGui::SliderFloat("eps", &cfg.fluid.eps, 1e-8f, 1e-3f, "%.8f", ImGuiSliderFlags_Logarithmic);
+
+        ImGui::Separator(); ImGui::Text("Spawn");
+        bool spawnDirty = false;
+        spawnDirty |= ImGui::Checkbox("spawnRandom", &cfg.fluid.spawnRandom);
+        spawnDirty |= ImGui::SliderFloat("spacing",   &cfg.fluid.spacing, 0.005f, 0.15f);
+        spawnDirty |= ImGui::SliderFloat3("spawnMin",  &cfg.fluid.spawnMin.x, -2.f, 2.f);
+        spawnDirty |= ImGui::SliderFloat3("spawnMax",  &cfg.fluid.spawnMax.x, -2.f, 2.f);
+        spawnDirty |= ImGui::SliderFloat3("initialVel",&cfg.fluid.initialVelocity.x, -5.f, 5.f);
+
+        ImGui::Separator(); ImGui::Text("Bounds (AABB)");
+        bool boundsDirty = false;
+        boundsDirty |= ImGui::SliderFloat3("boundsMin",  &cfg.fluid.boundsMin.x, -3.f, 3.f);
+        boundsDirty |= ImGui::SliderFloat3("boundsMax",  &cfg.fluid.boundsMax.x, -3.f, 3.f);
+        boundsDirty |= ImGui::SliderFloat("boundDamping", &cfg.fluid.boundDamping, 0.f, 1.f);
+
+        ImGui::Separator(); ImGui::Text("Neighbor Search");
+        { int hs = (int)cfg.fluid.hashSize;
+          if (ImGui::InputInt("hashSize", &hs)) { if (hs < 1024) hs = 1024; cfg.fluid.hashSize = (U32)hs; solverDirty = true; } }
+
+        ImGui::Separator(); ImGui::Text("sCorr");
+        bool scorrDirty = false;
+        scorrDirty |= ImGui::Checkbox("enableSCorr", &cfg.fluid.enableSCorr);
+        scorrDirty |= ImGui::SliderFloat("kCorr",  &cfg.fluid.kCorr,  0.f, 0.02f);
+        scorrDirty |= ImGui::SliderFloat("nCorr",  &cfg.fluid.nCorr,  1.f, 8.f);
+        scorrDirty |= ImGui::SliderFloat("deltaQ", &cfg.fluid.deltaQ, 0.05f, 0.6f);
+
+        ImGui::Separator(); ImGui::Text("Viscosity");
+        bool viscDirty = false;
+        viscDirty |= ImGui::Checkbox("enableViscosity", &cfg.fluid.enableViscosity);
+        viscDirty |= ImGui::SliderFloat("viscosity", &cfg.fluid.viscosity, 0.f, 0.2f);
+        if (viscDirty) solverDirty = true;
+
+        ImGui::Separator(); ImGui::Text("Vorticity Confinement");
+        bool vortDirty = false;
+        vortDirty |= ImGui::Checkbox("enableVorticity", &cfg.fluid.enableVorticity);
+        vortDirty |= ImGui::SliderFloat("epsilon", &cfg.fluid.vorticityEpsilon, 0.f, 1.f);
+        if (vortDirty) solverDirty = true;
+
         ImGui::Separator();
-        ImGui::Text("Viewer");
-        bool viewerChanged = false;
-        viewerChanged |= ImGui::SliderFloat("Point Radius", &cfg.viewer.pointRadius, 0.001f, 0.08f);
+        ImGui::TextDisabled("RMB: orbit  |  MMB: pan  |  Scroll: zoom");
+        ImGui::End();
 
-        // Time & Forces
-        ImGui::Separator();
-        ImGui::Text("Time & Forces");
-        bool solverChanged = false;
-        solverChanged |= ImGui::SliderFloat("dt", &cfg.fluid.dt, 1.0f / 240.0f, 1.0f / 30.0f);
-        solverChanged |= ImGui::SliderFloat3("gravity", &cfg.fluid.gravity.x, -30.0f, 30.0f);
-
-        // PBF Params
-        ImGui::Separator();
-        ImGui::Text("PBF Params");
-        solverChanged |= ImGui::SliderFloat("h (smoothing radius)", &cfg.fluid.h, 0.01f, 0.30f);
-        solverChanged |= ImGui::SliderFloat("rho0 (rest density)", &cfg.fluid.rho0, 100.0f, 3000.0f);
-        solverChanged |= ImGui::SliderInt("solver iterations", &cfg.fluid.solverIterations, 1, 12);
-        solverChanged |= ImGui::SliderInt("substep iterations", &cfg.fluid.substepIterations, 1, 5);
-        solverChanged |= ImGui::SliderFloat("eps", &cfg.fluid.eps, 1e-8f, 1e-3f, "%.8f", ImGuiSliderFlags_Logarithmic);
-
-        // Spawn
-        ImGui::Separator();
-        ImGui::Text("Spawn");
-        bool spawnChanged = false;
-        spawnChanged |= ImGui::Checkbox("spawnRandom", &cfg.fluid.spawnRandom);
-        spawnChanged |= ImGui::SliderFloat("spacing (grid)", &cfg.fluid.spacing, 0.005f, 0.15f);
-        spawnChanged |= ImGui::SliderFloat3("spawnMin", &cfg.fluid.spawnMin.x, -2.0f, 2.0f);
-        spawnChanged |= ImGui::SliderFloat3("spawnMax", &cfg.fluid.spawnMax.x, -2.0f, 2.0f);
-        spawnChanged |= ImGui::SliderFloat3("initialVelocity", &cfg.fluid.initialVelocity.x, -5.0f, 5.0f);
-
-        // Bounds
-        ImGui::Separator();
-        ImGui::Text("Bounds (AABB)");
-        bool boundsChanged = false;
-        boundsChanged |= ImGui::SliderFloat3("boundsMin", &cfg.fluid.boundsMin.x, -3.0f, 3.0f);
-        boundsChanged |= ImGui::SliderFloat3("boundsMax", &cfg.fluid.boundsMax.x, -3.0f, 3.0f);
-        boundsChanged |= ImGui::SliderFloat("boundDamping", &cfg.fluid.boundDamping, 0.0f, 1.0f);
-
-        // Neighbor Search
-        ImGui::Separator();
-        ImGui::Text("Neighbor Search");
-        bool hashChanged = false;
-        int hs = (int)cfg.fluid.hashSize;
-        hashChanged |= ImGui::InputInt("hashSize", &hs);
-        if (hashChanged) {
-            if (hs < 1024) hs = 1024;
-            cfg.fluid.hashSize = (U32)hs;
-            solverChanged = true; // neighbor search depends on this
-        }
-
-        // sCorr
-        ImGui::Separator();
-        ImGui::Text("sCorr (optional)");
-        bool scorrChanged = false;
-        scorrChanged |= ImGui::Checkbox("enableSCorr", &cfg.fluid.enableSCorr);
-        scorrChanged |= ImGui::SliderFloat("kCorr", &cfg.fluid.kCorr, 0.0f, 0.02f);
-        scorrChanged |= ImGui::SliderFloat("nCorr", &cfg.fluid.nCorr, 1.0f, 8.0f);
-        scorrChanged |= ImGui::SliderFloat("deltaQ", &cfg.fluid.deltaQ, 0.05f, 0.6f);
-
-		// Viscosity
-        ImGui::Separator();
-        ImGui::Text("Viscosity");
-        bool viscChanged = false;
-        viscChanged |= ImGui::Checkbox("enableViscosity", &cfg.fluid.enableViscosity);
-        viscChanged |= ImGui::SliderFloat("viscosity amount", &cfg.fluid.viscosity, 0.0f, 0.2f); // 0.2f üst limiti, istersen artýrabilirsin
-        if (viscChanged) {
-            solverChanged = true;
-        }
-
-        // ---------------------------
-        // APPLY CHANGES
-        // ---------------------------
-
-        if (viewerChanged) {
-            // visual point size
-            psCloud->setPointRadius(cfg.viewer.pointRadius, false);
-        }
-
-        // whenever pointRadius OR bounds change, re-apply bounds & box.
-        if (viewerChanged || boundsChanged) {
-            applyBoundsAndBox();
-        }
-
-        if (solverChanged || scorrChanged) {
+        // ---- Apply parameter changes ----------------------------
+        if (solverDirty || scorrDirty || boundsDirty) {
             fluid.setParams(cfg.fluid);
-            applyBoundsAndBox();
+            fluid.setBounds(cfg.fluid.boundsMin, cfg.fluid.boundsMax, cfg.fluid.boundDamping);
+        }
+        if (boundsDirty) {
+            fillBoxVerts(boxData, cfg.fluid.boundsMin, cfg.fluid.boundsMax);
+            glBindBuffer(GL_ARRAY_BUFFER, boxVBO);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(boxData), boxData);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+        }
+        if (spawnDirty) respawn = true;
+        if (respawn) {
+            fluid.setParticles(spawnParticles(cfg.fluid));
+            respawn = false;
         }
 
-        if (spawnChanged) {
-            respawnRequested = true;
-        }
-
-        if (respawnRequested) {
-            auto newParticles = spawnParticlesFromConfig(cfg.fluid);
-            fluid.setParticles(newParticles);
-
-            pts = toPSPoints(fluid.particles());
-            psCloud->updatePointPositions(pts);
-
-            respawnRequested = false;
-        }
-
-        // Run simulation
+        // ---- Simulation step (GPU only) -------------------------
         if (!paused || stepOnce) {
             fluid.step();
-            pts = toPSPoints(fluid.particles());
-            psCloud->updatePointPositions(pts);
             stepOnce = false;
         }
 
-        ImGui::PopItemWidth();
-        };
+        // ---- Clear -----------------------------------------------
+        glClearColor(0.04f, 0.04f, 0.06f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
 
-    polyscope::show();
+        glm::mat4 V  = viewMatrix();
+        float aspect  = (float)g_winW / std::max((float)g_winH, 1.f);
+        glm::mat4 P  = glm::perspective(glm::radians(45.f), aspect, 0.01f, 100.f);
+        glm::mat4 VP = P * V;
+
+        // ---- Draw particles (instanced from SSBO) ---------------
+        glEnable(GL_PROGRAM_POINT_SIZE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        glUseProgram(particleProg);
+        glUniformMatrix4fv(glGetUniformLocation(particleProg, "view"),       1, GL_FALSE, glm::value_ptr(V));
+        glUniformMatrix4fv(glGetUniformLocation(particleProg, "projection"), 1, GL_FALSE, glm::value_ptr(P));
+        glUniformMatrix4fv(glGetUniformLocation(particleProg, "model"),      1, GL_FALSE, glm::value_ptr(glm::mat4(1.f)));
+        glUniform1f(glGetUniformLocation(particleProg, "scale"), pointSize);
+
+        fluid.bindParticlesForRendering();   // SSBO 0 stays on GPU
+
+        glBindVertexArray(emptyVAO);
+        glDrawArraysInstanced(GL_POINTS, 0, 1, cfg.fluid.particleCount);
+        glBindVertexArray(0);
+
+        glDisable(GL_PROGRAM_POINT_SIZE);
+        glDisable(GL_BLEND);
+
+        // ---- Draw boundary box ----------------------------------
+        glUseProgram(lineProg);
+        glUniformMatrix4fv(glGetUniformLocation(lineProg, "VP"), 1, GL_FALSE, glm::value_ptr(VP));
+        glUniform3f(glGetUniformLocation(lineProg, "color"), 0.35f, 0.55f, 0.85f);
+
+        glBindVertexArray(boxVAO);
+        glDrawArrays(GL_LINES, 0, 24);
+        glBindVertexArray(0);
+
+        // ---- ImGui overlay --------------------------------------
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        glfwSwapBuffers(window);
+    }
+
+    // ---- Cleanup ------------------------------------------------
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    glDeleteVertexArrays(1, &emptyVAO);
+    glDeleteVertexArrays(1, &boxVAO);
+    glDeleteBuffers(1, &boxVBO);
+    glDeleteProgram(particleProg);
+    glDeleteProgram(lineProg);
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
     return 0;
 }

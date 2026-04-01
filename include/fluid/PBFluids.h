@@ -38,8 +38,8 @@ struct FluidConfigUBO {
     // 16 byte UInt parameters
     U32 hashSize;
     U32 particleCount;
-    U32 pad1;
-    U32 pad2;
+    U32 enableSCorr;
+    U32 enableViscosity;
 };
 
 
@@ -86,6 +86,9 @@ public:
     // Simulation step
     // ----------------------------
     void step();
+
+    // Bind particle SSBO to binding 0 for rendering
+    void bindParticlesForRendering() const { _ssboParticles.bindTo(0); }
 
 private:
     // apply forces + predict x*
@@ -141,7 +144,7 @@ private:
     // ----------------------------
     UBO<FluidConfigUBO> _uboConfig;
 
-    SSBO<Particle>   _ssboParticles; // Binding 0
+    SSBO<GpuParticle> _ssboParticles; // Binding 0
     SSBO<PVec4>      _ssboSolver;    // Binding 1 (PredPos_Lambda, DeltaP_Rho)
     SSBO<UVec2>        _ssboHashGrid;  // Binding 2 (Hash pairs)
     SSBO<IVec2>        _ssboOffsets;   // Binding 3 (Cell start/end indices)
@@ -155,6 +158,7 @@ private:
     ComputeShader _csComputeLambdas;
     ComputeShader _csComputeDeltaP;
     ComputeShader _csIntegrate;
+    ComputeShader _csVorticity;
 };
 
 #endif

@@ -1,6 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 512) in;
 
 const float PI = 3.14159265358979323846;
 
@@ -26,6 +26,11 @@ layout(std140, binding = 0) uniform FluidConfig {
     uint particleCount;
     uint enableSCorr;
     uint enableViscosity;
+
+    float cohesionStrength;
+    float interactionRadius;
+    float interactionStrength;
+    float padding3;
 } ubo;
 
 // =========================================================================
@@ -120,7 +125,8 @@ void main() {
     float h = ubo.h;
     
     vec3 dp = vec3(0.0);
-
+    
+    
     // =========================================================================
     // BOUNDARY HANDLING (GHOST PARTICLES)
     // =========================================================================
@@ -135,6 +141,7 @@ void main() {
     
     if (xi.z - ubo.boundsMin.z < h) ghosts[numGhosts++] = vec3(0.0, 0.0, 2.0 * (xi.z - ubo.boundsMin.z));
     if (ubo.boundsMax.z - xi.z < h) ghosts[numGhosts++] = vec3(0.0, 0.0, -2.0 * (ubo.boundsMax.z - xi.z));
+    
 
     // =========================================================================
     // NEIGHBOR SEARCH & ACCUMULATION
@@ -170,24 +177,11 @@ void main() {
         }
     }
 
-    // Ghost particle contributions
-    for (int g = 0; g < numGhosts; g++) {
-        vec3 ghost = ghosts[g];
-        vec3 gradW = calcGradSpikyPow3Kernel(ghost, h);
-        
-        float s = 2.0 * lambda_i; // No scorr for boundaries
-        dp += gradW * s;
-    }
-
     // =========================================================================
-    // FINALIZE & APPLY DELTA P
+    // ONLY STORE DELTA P, WE WILL UPDATE EVERYTHING ELSE IN THE INTEGRATION STEP
     // =========================================================================
     dp = dp * (1.0 / ubo.rho0);
     
-    // Store deltaP for debugging/visualization if needed
+    // Store deltaP
     solver[id].deltaP_rho.xyz = dp;
-    
-    // Immediately apply deltaP to predPos. Because we only read from the old 
-    // predPos in the loops above, writing to it here is perfectly safe across threads.
-    solver[id].predPos_lambda.xyz += dp;
 }

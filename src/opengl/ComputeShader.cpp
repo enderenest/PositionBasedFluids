@@ -51,6 +51,11 @@ void ComputeShader::setUint(const char* name, const U32 value) const
 	glUniform1ui(glGetUniformLocation(_id, name), value);
 }
 
+void ComputeShader::setVec3(const char* name, F32 x, F32 y, F32 z) const
+{
+	glUniform3f(glGetUniformLocation(_id, name), x, y, z);
+}
+
 U32 ComputeShader::getID() { return _id; }
 
 void ComputeShader::wait() const

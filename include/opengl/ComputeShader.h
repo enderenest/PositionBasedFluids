@@ -24,6 +24,8 @@ public:
 
 	void setUint(const char* name, const U32 value) const;
 
+	void setVec3(const char* name, F32 x, F32 y, F32 z) const;
+
 	void wait() const;
 
 	U32 getID();

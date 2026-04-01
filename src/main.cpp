@@ -284,6 +284,47 @@ int main() {
             lastMX = mx; lastMY = my;
         } else { midDown = false; }
 
+        // ---- Mouse interaction (left click) ---------------------
+        {
+            bool interacting = false;
+            PVec3 hitPos{0,0,0};
+
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS && !ImGui::GetIO().WantCaptureMouse) {
+                double mx, my;
+                glfwGetCursorPos(window, &mx, &my);
+
+                float ndcX = 2.0f * (float)mx / (float)g_winW - 1.0f;
+                float ndcY = 1.0f - 2.0f * (float)my / (float)g_winH;
+
+                glm::mat4 V = viewMatrix();
+                float aspect = (float)g_winW / std::max((float)g_winH, 1.f);
+                glm::mat4 P = glm::perspective(glm::radians(45.f), aspect, 0.01f, 100.f);
+
+                glm::vec4 rayClip(ndcX, ndcY, -1.0f, 1.0f);
+                glm::vec4 rayEye = glm::inverse(P) * rayClip;
+                rayEye.z = -1.0f; rayEye.w = 0.0f;
+                glm::vec3 rayDir = glm::normalize(glm::vec3(glm::inverse(V) * rayEye));
+
+                float cx = g_camDist * cosf(g_camPitch) * sinf(g_camYaw);
+                float cy = g_camDist * sinf(g_camPitch);
+                float cz = g_camDist * cosf(g_camPitch) * cosf(g_camYaw);
+                glm::vec3 rayOrig = g_camTarget + glm::vec3(cx, cy, cz);
+
+                // Intersect with a plane through camTarget, facing the camera
+                glm::vec3 camFwd = glm::normalize(g_camTarget - rayOrig);
+                float denom = glm::dot(camFwd, rayDir);
+                if (fabsf(denom) > 1e-6f) {
+                    float t = glm::dot(camFwd, g_camTarget - rayOrig) / denom;
+                    if (t > 0.0f) {
+                        glm::vec3 wp = rayOrig + t * rayDir;
+                        hitPos = { wp.x, wp.y, wp.z };
+                        interacting = true;
+                    }
+                }
+            }
+            fluid.setInteraction(interacting, hitPos);
+        }
+
         // ---- ImGui frame ----------------------------------------
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -305,7 +346,7 @@ int main() {
         ImGui::Separator(); ImGui::Text("Time & Forces");
         bool solverDirty = false;
         solverDirty |= ImGui::SliderFloat("dt",      &cfg.fluid.dt, 1.f/240.f, 1.f/30.f);
-        solverDirty |= ImGui::SliderFloat3("gravity", &cfg.fluid.gravity.x, -30.f, 30.f);
+        solverDirty |= ImGui::SliderFloat3("gravity", &cfg.fluid.gravity.x, -10.f, 10.f);
 
         ImGui::Separator(); ImGui::Text("PBF Params");
         solverDirty |= ImGui::SliderFloat("h",    &cfg.fluid.h,    0.01f, 0.30f);
@@ -320,14 +361,14 @@ int main() {
         bool spawnDirty = false;
         spawnDirty |= ImGui::Checkbox("spawnRandom", &cfg.fluid.spawnRandom);
         spawnDirty |= ImGui::SliderFloat("spacing",   &cfg.fluid.spacing, 0.005f, 0.15f);
-        spawnDirty |= ImGui::SliderFloat3("spawnMin",  &cfg.fluid.spawnMin.x, -2.f, 2.f);
-        spawnDirty |= ImGui::SliderFloat3("spawnMax",  &cfg.fluid.spawnMax.x, -2.f, 2.f);
+        spawnDirty |= ImGui::SliderFloat3("spawnMin",  &cfg.fluid.spawnMin.x, 0.0f, 6.f);
+        spawnDirty |= ImGui::SliderFloat3("spawnMax",  &cfg.fluid.spawnMax.x, 0.0f, 6.f);
         spawnDirty |= ImGui::SliderFloat3("initialVel",&cfg.fluid.initialVelocity.x, -5.f, 5.f);
 
         ImGui::Separator(); ImGui::Text("Bounds (AABB)");
         bool boundsDirty = false;
-        boundsDirty |= ImGui::SliderFloat3("boundsMin",  &cfg.fluid.boundsMin.x, -3.f, 3.f);
-        boundsDirty |= ImGui::SliderFloat3("boundsMax",  &cfg.fluid.boundsMax.x, -3.f, 3.f);
+        boundsDirty |= ImGui::SliderFloat3("boundsMin",  &cfg.fluid.boundsMin.x, 0.0f, 10.f);
+        boundsDirty |= ImGui::SliderFloat3("boundsMax",  &cfg.fluid.boundsMax.x, 0.f, 10.f);
         boundsDirty |= ImGui::SliderFloat("boundDamping", &cfg.fluid.boundDamping, 0.f, 1.f);
 
         ImGui::Separator(); ImGui::Text("Neighbor Search");
@@ -340,6 +381,13 @@ int main() {
         scorrDirty |= ImGui::SliderFloat("kCorr",  &cfg.fluid.kCorr,  0.f, 0.02f);
         scorrDirty |= ImGui::SliderFloat("nCorr",  &cfg.fluid.nCorr,  1.f, 8.f);
         scorrDirty |= ImGui::SliderFloat("deltaQ", &cfg.fluid.deltaQ, 0.05f, 0.6f);
+
+        ImGui::Separator(); ImGui::Text("Cohesion");
+        solverDirty |= ImGui::SliderFloat("cohesionStrength", &cfg.fluid.cohesionStrength, 0.0f, 0.05f, "%.4f");
+
+        ImGui::Separator(); ImGui::Text("Mouse Interaction");
+        solverDirty |= ImGui::SliderFloat("interactionRadius",   &cfg.fluid.interactionRadius,   0.1f, 5.0f);
+        solverDirty |= ImGui::SliderFloat("interactionStrength", &cfg.fluid.interactionStrength, -30.0f, 30.0f);
 
         ImGui::Separator(); ImGui::Text("Viscosity");
         bool viscDirty = false;
@@ -354,7 +402,7 @@ int main() {
         if (vortDirty) solverDirty = true;
 
         ImGui::Separator();
-        ImGui::TextDisabled("RMB: orbit  |  MMB: pan  |  Scroll: zoom");
+        ImGui::TextDisabled("LMB: interact  |  RMB: orbit  |  MMB: pan  |  Scroll: zoom");
         ImGui::End();
 
         // ---- Apply parameter changes ----------------------------
@@ -381,7 +429,7 @@ int main() {
         }
 
         // ---- Clear -----------------------------------------------
-        glClearColor(0.04f, 0.04f, 0.06f, 1.0f);
+        glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
 

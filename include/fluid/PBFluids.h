@@ -40,6 +40,11 @@ struct FluidConfigUBO {
     U32 particleCount;
     U32 enableSCorr;
     U32 enableViscosity;
+
+    F32 cohesionStrength;
+    F32 interactionRadius;
+    F32 interactionStrength;
+    F32 padding3;
 };
 
 
@@ -81,6 +86,11 @@ public:
 
     // simple AABB bounds for collisions (early CPU prototype, Akinci boundary problem exists here)
     void setBounds(const PVec3& minBound, const PVec3& maxBound, F32 damping = 0.0f);
+
+    // ----------------------------
+    // Mouse interaction
+    // ----------------------------
+    void setInteraction(bool active, const PVec3& pos);
 
     // ----------------------------
     // Simulation step
@@ -157,6 +167,7 @@ private:
     ComputeShader _csBuildOffsets;
     ComputeShader _csComputeLambdas;
     ComputeShader _csComputeDeltaP;
+    ComputeShader _csApplyDeltaP;
     ComputeShader _csIntegrate;
     ComputeShader _csVorticity;
 };

@@ -20,6 +20,7 @@ PBFluids::PBFluids(const FluidConfig& p)
     , _csBuildOffsets(RESOURCES_PATH "shaders/compute/CS_BuildOffsets.glsl")
     , _csComputeLambdas(RESOURCES_PATH "shaders/compute/CS_ComputeLambdas.glsl")
     , _csComputeDeltaP(RESOURCES_PATH "shaders/compute/CS_ComputeDeltaP.glsl")
+    , _csApplyDeltaP(RESOURCES_PATH "shaders/compute/CS_ApplyDeltaP.glsl")
     , _csIntegrate(RESOURCES_PATH "shaders/compute/CS_Integrate.glsl")
     , _csVorticity(RESOURCES_PATH "shaders/compute/CS_VorticityConfinement.glsl")
 {
@@ -55,6 +56,11 @@ void PBFluids::setParams(const FluidConfig& p)
     uboData.particleCount = _params.particleCount;
     uboData.enableSCorr = _params.enableSCorr ? 1u : 0u;
     uboData.enableViscosity = _params.enableViscosity ? 1u : 0u;
+
+    uboData.cohesionStrength = _params.cohesionStrength;
+    uboData.interactionRadius = _params.interactionRadius;
+    uboData.interactionStrength = _params.interactionStrength;
+    uboData.padding3 = 0.0f;
 
     _uboConfig.upload(uboData);
 }
@@ -102,6 +108,17 @@ void PBFluids::setBounds(const PVec3& minBound, const PVec3& maxBound, F32 dampi
 }
 
 // ------------------------------------------------------------
+// Mouse interaction
+// ------------------------------------------------------------
+
+void PBFluids::setInteraction(bool active, const PVec3& pos)
+{
+    _csPredictAndHash.use();
+    _csPredictAndHash.setUint("isInteracting", active ? 1u : 0u);
+    _csPredictAndHash.setVec3("interactionPos", pos.x, pos.y, pos.z);
+}
+
+// ------------------------------------------------------------
 // Main step (GPU Compute Pipeline)
 // ------------------------------------------------------------
 
@@ -112,7 +129,7 @@ void PBFluids::step()
     const U32 N = _params.particleCount;
 
     // Standard compute shader workgroup size (256 threads per group)
-    const U32 workgroupSize = 256;
+    const U32 workgroupSize = 512;
     const U32 numGroups = (N + workgroupSize - 1) / workgroupSize;
     const U32 gridGroups = (_params.hashSize + workgroupSize - 1) / workgroupSize;
 
@@ -169,6 +186,10 @@ void PBFluids::step()
             _csComputeDeltaP.use();
             _csComputeDeltaP.dispatch(numGroups);
             _csComputeDeltaP.wait();
+
+            _csApplyDeltaP.use();
+            _csApplyDeltaP.dispatch(numGroups);
+            _csApplyDeltaP.wait();
         }
 
         // 5. Integrate & Handle Collisions (also computes curl if vorticity enabled)

@@ -1,7 +1,7 @@
 #version 430 core
 
-// Match the workgroup size we defined in C++ (256)
-layout(local_size_x = 256) in;
+// Match the workgroup size we defined in C++
+layout(local_size_x = 512) in;
 
 // =========================================================================
 // UBO: Global Fluid Configuration (Binding 0)
@@ -25,7 +25,18 @@ layout(std140, binding = 0) uniform FluidConfig {
     uint particleCount;
     uint enableSCorr;
     uint enableViscosity;
+
+    float cohesionStrength;
+    float interactionRadius;
+    float interactionStrength;
+    float padding3;
 } ubo;
+
+// =========================================================================
+// Per-frame interaction uniforms
+// =========================================================================
+uniform uint isInteracting;
+uniform vec3 interactionPos;
 
 // =========================================================================
 // SSBOs (Bindings 0, 1, 2)
@@ -84,8 +95,19 @@ void main() {
     float dt = ubo.gravity_dt.w;
     vec3 gravity = ubo.gravity_dt.xyz;
 
-    // 2. Apply Forces & Predict (Exactly matching CPU)
+    // 2. Apply Forces & Predict
     vel += gravity * dt;
+
+    // Mouse interaction force
+    if (isInteracting == 1u) {
+        vec3 toTarget = interactionPos - pos;
+        float dist = length(toTarget);
+        if (dist < ubo.interactionRadius && dist > 1e-5) {
+            float falloff = 1.0 - (dist / ubo.interactionRadius);
+            vel += normalize(toTarget) * ubo.interactionStrength * falloff * dt;
+        }
+    }
+
     vec3 predPos = pos + vel * dt;
 
     // Update velocity in ParticleBuffer so it persists 

@@ -1,6 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 512) in;
 
 const float PI = 3.14159265358979323846;
 
@@ -26,6 +26,11 @@ layout(std140, binding = 0) uniform FluidConfig {
     uint particleCount;
     uint enableSCorr;
     uint enableViscosity;
+
+    float cohesionStrength;
+    float interactionRadius;
+    float interactionStrength;
+    float padding3;
 } ubo;
 
 // =========================================================================
@@ -108,6 +113,7 @@ void main() {
     float sum_grad_Ci_sq = 0.0;
     vec3 grad_Ci_i = vec3(0.0);
 
+    
     // =========================================================================
     // BOUNDARY HANDLING (GHOST PARTICLES)
     // =========================================================================
@@ -123,6 +129,7 @@ void main() {
     if (xi.z - ubo.boundsMin.z < h) ghosts[numGhosts++] = vec3(0.0, 0.0, 2.0 * (xi.z - ubo.boundsMin.z));
     if (ubo.boundsMax.z - xi.z < h) ghosts[numGhosts++] = vec3(0.0, 0.0, -2.0 * (ubo.boundsMax.z - xi.z));
 
+    
     // =========================================================================
     // NEIGHBOR SEARCH & ACCUMULATION
     // =========================================================================
@@ -157,19 +164,10 @@ void main() {
         }
     }
 
-    // Ghost particle contributions
-    for (int g = 0; g < numGhosts; g++) {
-        vec3 rghost = ghosts[g];
-        rho_i += calcPoly6Kernel(rghost, h);
-        
-        vec3 gradW = calcGradSpikyPow3Kernel(rghost, h);
-        grad_Ci_i += gradW * (1.0 / ubo.rho0);
-    }
-
     // =========================================================================
     // FINALIZE LAMBDA & RHO
     // =========================================================================
-    float C_i = max((rho_i / ubo.rho0) - 1.0, 0.0);
+    float C_i = max((rho_i / ubo.rho0) - 1.0, -ubo.cohesionStrength); 
     sum_grad_Ci_sq += dot(grad_Ci_i, grad_Ci_i);
     float lambda_i = -C_i / (sum_grad_Ci_sq + ubo.eps);
 

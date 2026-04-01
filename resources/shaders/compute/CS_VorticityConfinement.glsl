@@ -1,6 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 512) in;
 
 const float PI = 3.14159265358979323846;
 
@@ -26,6 +26,11 @@ layout(std140, binding = 0) uniform FluidConfig {
     uint particleCount;
     uint enableSCorr;
     uint enableViscosity;
+
+    float cohesionStrength;
+    float interactionRadius;
+    float interactionStrength;
+    float padding3;
 } ubo;
 
 // =========================================================================

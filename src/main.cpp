@@ -17,6 +17,7 @@
 #include "imgui_impl_opengl3.h"
 
 #include "core/Config.h"
+#include "core/Scene.h"
 #include "fluid/PBFluids.h"
 #include "fluid/Particle.h"
 
@@ -197,6 +198,8 @@ int main() {
 
     // ------ Simulation -------------------------------------------
     Config cfg{};
+    const auto& scenes = getScenes();
+    int currentScene = 0;
     PBFluids fluid(cfg.fluid);
     fluid.setParticles(spawnParticles(cfg.fluid));
     fluid.setCollisionPadding(0.0f);
@@ -332,6 +335,39 @@ int main() {
 
         ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
         ImGui::Text("FPS: %d  |  Particles: %u", fps, cfg.fluid.particleCount);
+        ImGui::Separator();
+
+        // Scene selector
+        if (ImGui::Combo("Scene", &currentScene,
+            [](void* data, int idx, const char** out) -> bool {
+                auto* s = (const std::vector<Scene>*)data;
+                if (idx < 0 || idx >= (int)s->size()) return false;
+                *out = (*s)[idx].name;
+                return true;
+            },
+            (void*)&scenes, (int)scenes.size()))
+        {
+            const Scene& sc = scenes[currentScene];
+            cfg.fluid   = sc.fluid;
+            pointSize   = sc.pointSize;
+            g_camYaw    = sc.camYaw;
+            g_camPitch  = sc.camPitch;
+            g_camDist   = sc.camDist;
+            g_camTarget = glm::vec3(
+                (sc.fluid.boundsMin.x + sc.fluid.boundsMax.x) * 0.5f,
+                (sc.fluid.boundsMin.y + sc.fluid.boundsMax.y) * 0.5f,
+                (sc.fluid.boundsMin.z + sc.fluid.boundsMax.z) * 0.5f);
+
+            fluid.setParams(cfg.fluid);
+            fluid.setBounds(cfg.fluid.boundsMin, cfg.fluid.boundsMax, cfg.fluid.boundDamping);
+
+            fillBoxVerts(boxData, cfg.fluid.boundsMin, cfg.fluid.boundsMax);
+            glBindBuffer(GL_ARRAY_BUFFER, boxVBO);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(boxData), boxData);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+            fluid.setParticles(spawnParticles(cfg.fluid));
+        }
         ImGui::Separator();
 
         if (ImGui::Checkbox("Paused", &paused)) {}

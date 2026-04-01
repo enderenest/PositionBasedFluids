@@ -52,7 +52,7 @@ struct FluidConfig {
 	F32 interactionStrength = 25.0f;				// force magnitude (negative = push, positive = pull)
 
 	// Vorticity confinement
-	bool enableVorticity = false;
+	bool enableVorticity = true;
 	F32 vorticityEpsilon = 0.05f;				// re-injects rotational energy lost to damping
 };
 

@@ -17,9 +17,9 @@ inline const std::vector<Scene>& getScenes()
 {
     static const std::vector<Scene> scenes = {
 
-        // 0 — Dam Break
+		// 0 — Default Test
         {
-            "Dam Break",
+            "Default Test",
             {
                 /* dt */                1.0f / 60.0f,
                 /* gravity */           { 0.0f, -3.81f, 0.0f },
@@ -50,28 +50,67 @@ inline const std::vector<Scene>& getScenes()
                 /* enableVorticity */   true,
                 /* vorticityEpsilon */  0.05f,
             },
-            /* camYaw */   0.45f,
-            /* camPitch */ 0.35f,
-            /* camDist */  4.5f,
+            /* camYaw */   0.6f,
+            /* camPitch */ 0.5f,
+            /* camDist */  12.0f,
             /* pointSize */ 8.0f,
         },
 
-        // 1 — Dripping Faucet
+        // 1 — Dam Break: tall column on left side collapses across the floor
+        {
+            "Dam Break",
+            {
+                /* dt */                1.0f / 60.0f,
+                /* gravity */           { 0.0f, -9.81f, 0.0f },
+                /* h */                 0.15f,
+                /* rho0 */              1200.0f,
+                /* solverIterations */   4,
+                /* substepIterations */  3,
+                /* eps */               0.0001f,
+                /* particleCount */     1 << 16,
+                /* spawnMin */          { 0.1f, 0.1f, 0.1f },
+                /* spawnMax */          { 2.5f, 5.8f, 5.8f },
+                /* spawnRandom */       false,
+                /* spacing */           0.1f,
+                /* initialVelocity */   { 0.0f, 0.0f, 0.0f },
+                /* boundsMin */         { 0.0f, 0.0f, 0.0f },
+                /* boundsMax */         { 8.0f, 6.0f, 6.0f },
+                /* boundDamping */      0.4f,
+                /* hashSize */          1 << 18,
+                /* enableSCorr */       true,
+                /* kCorr */             0.001f,
+                /* nCorr */             4.0f,
+                /* deltaQ */            0.3f,
+                /* cohesionStrength */  0.001f,
+                /* enableViscosity */   true,
+                /* viscosity */         0.1f,
+                /* interactionRadius */ 1.5f,
+                /* interactionStrength */ 25.0f,
+                /* enableVorticity */   true,
+                /* vorticityEpsilon */  0.05f,
+            },
+            /* camYaw */   0.45f,
+            /* camPitch */ 0.4f,
+            /* camDist */  15.0f,
+            /* pointSize */ 7.0f,
+        },
+
+        // 2 — Dripping Faucet
         {
             "Dripping Faucet",
             {
                 /* dt */                1.0f / 60.0f,
-                /* gravity */           { 0.0f, -6.0f, 0.0f },
-                /* h */                 0.12f,
+                /* gravity */           { 0.0f, -4.0f, 0.0f },
+                /* h */                 0.15f,
                 /* rho0 */              1200.0f,
-                /* solverIterations */   3,
-                /* substepIterations */  2,
+                /* solverIterations */   4,
+                /* substepIterations */  3,
                 /* eps */               0.0001f,
                 /* particleCount */     1 << 14,
-                /* spawnMin */          { 1.3f, 3.5f, 1.3f },
-                /* spawnMax */          { 1.7f, 4.5f, 1.7f },
-                /* spawnRandom */       true,
-                /* spacing */           0.06f,
+                /* spawnMin */          { 1.4f, 4.1f, 1.3f },
+                /* spawnMax */          { 2.0f, 4.5f, 2.0f },
+                /* spawnRandom */       false,
+                /* spacing */           0.02f,
                 /* initialVelocity */   { 0.0f, 0.0f, 0.0f },
                 /* boundsMin */         { 0.0f, 0.0f, 0.0f },
                 /* boundsMax */         { 3.0f, 5.0f, 3.0f },
@@ -81,21 +120,21 @@ inline const std::vector<Scene>& getScenes()
                 /* kCorr */             0.001f,
                 /* nCorr */             4.0f,
                 /* deltaQ */            0.3f,
-                /* cohesionStrength */  0.01f,
+                /* cohesionStrength */  0.001f,
                 /* enableViscosity */   true,
-                /* viscosity */         0.05f,
+                /* viscosity */         0.1f,
                 /* interactionRadius */ 1.5f,
                 /* interactionStrength */ 25.0f,
                 /* enableVorticity */   true,
                 /* vorticityEpsilon */  0.05f,
             },
-            /* camYaw */   0.3f,
-            /* camPitch */ 0.25f,
-            /* camDist */  5.0f,
-            /* pointSize */ 6.0f,
+            /* camYaw */   0.6f,
+            /* camPitch */ 0.5f,
+            /* camDist */  10.0f,
+            /* pointSize */ 8.0f,
         },
 
-        // 2 — Large Tank
+        // 3 — Large Tank
         {
             "Large Tank",
             {
@@ -130,11 +169,11 @@ inline const std::vector<Scene>& getScenes()
             },
             /* camYaw */   0.6f,
             /* camPitch */ 0.5f,
-            /* camDist */  12.0f,
+            /* camDist */  20.0f,
             /* pointSize */ 5.0f,
         },
 
-        // 3 — High-Speed Impact
+        // 4 — High-Speed Impact
         {
             "High-Speed Impact",
             {
@@ -142,10 +181,10 @@ inline const std::vector<Scene>& getScenes()
                 /* gravity */           { 0.0f, -2.0f, 0.0f },
                 /* h */                 0.15f,
                 /* rho0 */              1200.0f,
-                /* solverIterations */   3,
-                /* substepIterations */  2,
+                /* solverIterations */   6,
+                /* substepIterations */  3,
                 /* eps */               0.0001f,
-                /* particleCount */     1 << 15,
+                /* particleCount */     1 << 14,
                 /* spawnMin */          { 0.3f, 0.3f, 1.5f },
                 /* spawnMax */          { 2.5f, 4.0f, 4.5f },
                 /* spawnRandom */       false,
@@ -154,7 +193,7 @@ inline const std::vector<Scene>& getScenes()
                 /* boundsMin */         { 0.0f, 0.0f, 0.0f },
                 /* boundsMax */         { 8.0f, 5.0f, 6.0f },
                 /* boundDamping */      0.3f,
-                /* hashSize */          1 << 17,
+                /* hashSize */          1 << 16,
                 /* enableSCorr */       true,
                 /* kCorr */             0.001f,
                 /* nCorr */             4.0f,
@@ -169,11 +208,11 @@ inline const std::vector<Scene>& getScenes()
             },
             /* camYaw */   0.0f,
             /* camPitch */ 0.4f,
-            /* camDist */  8.0f,
+            /* camDist */  11.0f,
             /* pointSize */ 7.0f,
         },
 
-        // 4 — Viscous Goo
+        // 5 — Viscous Goo
         {
             "Viscous Goo",
             {
@@ -181,7 +220,7 @@ inline const std::vector<Scene>& getScenes()
                 /* gravity */           { 0.0f, -1.5f, 0.0f },
                 /* h */                 0.15f,
                 /* rho0 */              2000.0f,
-                /* solverIterations */   5,
+                /* solverIterations */   3,
                 /* substepIterations */  2,
                 /* eps */               0.0001f,
                 /* particleCount */     1 << 14,
@@ -198,7 +237,7 @@ inline const std::vector<Scene>& getScenes()
                 /* kCorr */             0.001f,
                 /* nCorr */             4.0f,
                 /* deltaQ */            0.3f,
-                /* cohesionStrength */  0.03f,
+                /* cohesionStrength */  0.02f,
                 /* enableViscosity */   true,
                 /* viscosity */         0.19f,
                 /* interactionRadius */ 1.5f,
@@ -208,8 +247,8 @@ inline const std::vector<Scene>& getScenes()
             },
             /* camYaw */   0.5f,
             /* camPitch */ 0.3f,
-            /* camDist */  5.5f,
-            /* pointSize */ 10.0f,
+            /* camDist */  8.5f,
+            /* pointSize */ 8.0f,
         },
     };
     return scenes;

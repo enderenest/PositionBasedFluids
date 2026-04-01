@@ -36,7 +36,7 @@
 static int   g_winW = 1600, g_winH = 900;
 static float g_camYaw   = 0.45f;
 static float g_camPitch = 0.35f;
-static float g_camDist  = 4.5f;
+static float g_camDist  = 12.5f;
 static glm::vec3 g_camTarget(1.0f, 1.0f, 1.0f);
 
 static void framebufferCB(GLFWwindow*, int w, int h) {

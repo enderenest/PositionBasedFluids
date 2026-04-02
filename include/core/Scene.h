@@ -23,8 +23,8 @@ inline const std::vector<Scene>& getScenes()
             {
                 /* dt */                1.0f / 60.0f,
                 /* gravity */           { 0.0f, -3.81f, 0.0f },
-                /* h */                 0.15f,
-                /* rho0 */              1200.0f,
+                /* h */                 0.14f,
+                /* rho0 */              1000.0f,
                 /* solverIterations */   3,
                 /* substepIterations */  2,
                 /* eps */               0.0001f,

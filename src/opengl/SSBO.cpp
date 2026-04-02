@@ -76,3 +76,5 @@ template class SSBO<GpuParticle>;
 template class SSBO<PVec4>;
 template class SSBO<UVec2>;
 template class SSBO<IVec2>;
+template class SSBO<UVec2>;
+template class SSBO<U32>;

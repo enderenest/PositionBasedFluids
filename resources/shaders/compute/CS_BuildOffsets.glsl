@@ -1,6 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 512) in;
+layout(local_size_x = 256) in;
 
 // =========================================================================
 // UBO: Global Fluid Configuration (Binding 0)
@@ -9,17 +9,17 @@ layout(std140, binding = 0) uniform FluidConfig {
     vec4 boundsMin;
     vec4 boundsMax;
     vec4 gravity_dt;
-    
+
     float h;
     float rho0;
     float eps;
     float wq;
-    
+
     float kCorr;
     float nCorr;
     float viscosity;
     float boundDamping;
-    
+
     uint hashSize;
     uint particleCount;
     uint enableSCorr;
@@ -28,7 +28,12 @@ layout(std140, binding = 0) uniform FluidConfig {
     float cohesionStrength;
     float interactionRadius;
     float interactionStrength;
-    float padding3;
+    float w0_self;
+
+    uint  hashMask;
+    float poly6Coeff;
+    float spikyCoeff;
+    float invRho0;
 } ubo;
 
 uniform uint clearMode;

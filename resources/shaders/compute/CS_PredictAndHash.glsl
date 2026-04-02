@@ -1,7 +1,7 @@
 #version 430 core
 
 // Match the workgroup size we defined in C++
-layout(local_size_x = 512) in;
+layout(local_size_x = 256) in;
 
 // =========================================================================
 // UBO: Global Fluid Configuration (Binding 0)
@@ -10,17 +10,17 @@ layout(std140, binding = 0) uniform FluidConfig {
     vec4 boundsMin;
     vec4 boundsMax;
     vec4 gravity_dt; // xyz: gravity, w: subDt
-    
+
     float h;
     float rho0;
     float eps;
     float wq;
-    
+
     float kCorr;
     float nCorr;
     float viscosity;
     float boundDamping;
-    
+
     uint hashSize;
     uint particleCount;
     uint enableSCorr;
@@ -29,7 +29,12 @@ layout(std140, binding = 0) uniform FluidConfig {
     float cohesionStrength;
     float interactionRadius;
     float interactionStrength;
-    float padding3;
+    float w0_self;
+
+    uint  hashMask;
+    float poly6Coeff;
+    float spikyCoeff;
+    float invRho0;
 } ubo;
 
 // =========================================================================
@@ -72,11 +77,8 @@ uint getGridHash(ivec3 cell) {
     const int p1 = 73856093;
     const int p2 = 19349663;
     const int p3 = 83492791;
-    
     int n = (cell.x * p1) ^ (cell.y * p2) ^ (cell.z * p3);
-    
-    // Modulo ensures the hash fits perfectly into our hashSize buckets
-    return uint(n) % ubo.hashSize;
+    return uint(n) & ubo.hashMask;
 }
 
 // =========================================================================

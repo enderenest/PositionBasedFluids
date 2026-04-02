@@ -1,6 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 512) in;
+layout(local_size_x = 256) in;
 
 layout(std140, binding = 0) uniform FluidConfig {
     vec4 boundsMin;
@@ -22,7 +22,12 @@ layout(std140, binding = 0) uniform FluidConfig {
     float cohesionStrength;
     float interactionRadius;
     float interactionStrength;
-    float padding3;
+    float w0_self;
+
+    uint  hashMask;
+    float poly6Coeff;
+    float spikyCoeff;
+    float invRho0;
 } ubo;
 
 struct SolverData {
@@ -44,8 +49,14 @@ void main() {
     // No single iteration should move a particle more than this — if it would,
     // it means lambda exploded (isolated particle, near-zero denominator).
     float maxDp = 0.5 * ubo.h;
-    float dpLen = length(dp);
-    if (dpLen > maxDp) dp *= (maxDp / dpLen);
+    float dpLenSq = dot(dp, dp);
+    float maxDpSq = maxDp * maxDp;
+
+    if (dpLenSq > maxDpSq) {
+        // Only compute sqrt if needed
+        float dpLen = sqrt(dpLenSq);
+        dp *= (maxDp / dpLen);
+    }
 
     solver[id].predPos_lambda.xyz += dp;
 }

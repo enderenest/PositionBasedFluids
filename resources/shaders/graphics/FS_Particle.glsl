@@ -30,7 +30,7 @@ void main()
 
     // Speed → color (normalize to a wider range so colors stay stable)
     float speed = length(velocity);
-    float t     = clamp(speed / 5.0, 0.0, 1.0);
+    float t     = clamp(speed / 10.0, 0.0, 1.0);
     vec3  col   = heatmap(t);
 
     FragColor = vec4(col, alpha);

@@ -1,7 +1,7 @@
 #version 430 core
 
 // Match the workgroup size defined in the C++ step() function
-layout(local_size_x = 512) in;
+layout(local_size_x = 256) in;
 
 // =========================================================================
 // Uniforms

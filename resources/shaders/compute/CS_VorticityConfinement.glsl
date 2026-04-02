@@ -1,8 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 512) in;
-
-const float PI = 3.14159265358979323846;
+layout(local_size_x = 256) in;
 
 // =========================================================================
 // UBO: Global Fluid Configuration (Binding 0)
@@ -30,11 +28,16 @@ layout(std140, binding = 0) uniform FluidConfig {
     float cohesionStrength;
     float interactionRadius;
     float interactionStrength;
-    float padding3;
+    float w0_self;
+
+    uint  hashMask;
+    float poly6Coeff;
+    float spikyCoeff;
+    float invRho0;
 } ubo;
 
 // =========================================================================
-// SSBOs (Binding 0, 1, 2, 3))
+// SSBOs (Binding 0, 1, 2, 3)
 // =========================================================================
 struct Particle {
     vec4 pos;
@@ -69,23 +72,23 @@ uniform uint  pass;             // 0 = compute curl, 1 = apply vorticity force
 uniform float vorticityEpsilon;
 
 // =========================================================================
-// Hash + Kernel
+// Hash + Kernel — pre-computed coefficients
 // =========================================================================
 uint getGridHash(ivec3 cell) {
     const int p1 = 73856093, p2 = 19349663, p3 = 83492791;
     int n = (cell.x * p1) ^ (cell.y * p2) ^ (cell.z * p3);
-    return uint(n) % ubo.hashSize;
+    return uint(n) & ubo.hashMask;
 }
 
-vec3 calcGradSpikyPow3Kernel(vec3 r, float h) {
-    float dist = length(r);
-    if (dist > h || dist < 1e-5) return vec3(0.0);
+vec3 calcGradSpikyKernel(vec3 r) {
+    float r2 = dot(r, r);
+    float h2 = ubo.h * ubo.h;
+    if (r2 > h2 || r2 < 1e-10) return vec3(0.0);
 
-    float coeff = 45.0 / PI;
-    float h6 = h * h * h * h * h * h;
-    float diff = h - dist;
-
-    return r * (-diff * diff * (coeff / h6) / dist);
+    float dist = sqrt(r2);
+    float diff = ubo.h - dist;
+    float scalar = -ubo.spikyCoeff * diff * diff / dist;
+    return r * scalar;
 }
 
 // =========================================================================
@@ -97,16 +100,14 @@ void main() {
 
     vec3 pos_i = particles[id].pos.xyz;
     vec3 vel_i = particles[id].vel.xyz;
-    float h    = ubo.h;
 
-    ivec3 cellCoord = ivec3(floor(pos_i / h));
+    ivec3 cellCoord = ivec3(floor(pos_i / ubo.h));
 
     if (pass == 0u) {
         // =====================================================================
         // PASS 0: Compute curl  w_i = (1/rho0) * sum_j (v_j - v_i) x gradW_ij
         // =====================================================================
         vec3 curl = vec3(0.0);
-        float invRho0 = 1.0 / ubo.rho0;
 
         for (int dz = -1; dz <= 1; dz++)
         for (int dy = -1; dy <= 1; dy++)
@@ -119,22 +120,20 @@ void main() {
                 if (id == j) continue;
 
                 vec3 rij   = pos_i - particles[j].pos.xyz;
-                vec3 gradW = calcGradSpikyPow3Kernel(rij, h);
+                vec3 gradW = calcGradSpikyKernel(rij);
                 vec3 vij   = particles[j].vel.xyz - vel_i;
 
                 curl += cross(vij, gradW);
             }
         }
 
-        // SPH normalization: divide by rest density (mass = 1 assumed)
-        solver[id].deltaP_rho.xyz = curl * invRho0;
+        solver[id].deltaP_rho.xyz = curl * ubo.invRho0;
     }
     else {
         // =====================================================================
         // PASS 1: Compute eta = (1/rho0) * grad|w|, then apply vorticity force
         // =====================================================================
         vec3 eta = vec3(0.0);
-        float invRho0 = 1.0 / ubo.rho0;
 
         for (int dz = -1; dz <= 1; dz++)
         for (int dy = -1; dy <= 1; dy++)
@@ -147,15 +146,14 @@ void main() {
                 if (id == j) continue;
 
                 vec3 rij      = pos_i - particles[j].pos.xyz;
-                vec3 gradW    = calcGradSpikyPow3Kernel(rij, h);
+                vec3 gradW    = calcGradSpikyKernel(rij);
                 float omegaJ  = length(solver[j].deltaP_rho.xyz);
 
                 eta += omegaJ * gradW;
             }
         }
 
-        // SPH normalization
-        eta *= invRho0;
+        eta *= ubo.invRho0;
 
         float etaLen = length(eta);
         if (etaLen < 1e-6) return;
@@ -164,7 +162,6 @@ void main() {
         vec3  omega = solver[id].deltaP_rho.xyz;
         float dt    = ubo.gravity_dt.w;
 
-        // f_vorticity = epsilon * (N x omega)
         particles[id].vel.xyz += vorticityEpsilon * cross(N, omega) * dt;
     }
 }

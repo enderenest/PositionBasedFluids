@@ -44,7 +44,13 @@ struct FluidConfigUBO {
     F32 cohesionStrength;
     F32 interactionRadius;
     F32 interactionStrength;
-    F32 padding3;
+    F32 w0_self;  // Pre-computed: calcPoly6Kernel(vec3(0.0), h)
+
+    // Pre-computed kernel coefficients (avoid per-neighbor recomputation)
+    U32 hashMask;      // hashSize - 1, for bitwise AND instead of modulo
+    F32 poly6Coeff;    // 315.0 / (64.0 * PI * h^9)
+    F32 spikyCoeff;    // 45.0 / (PI * h^6)
+    F32 invRho0;       // 1.0 / rho0
 };
 
 
@@ -154,16 +160,24 @@ private:
     // ----------------------------
     UBO<FluidConfigUBO> _uboConfig;
 
-    SSBO<GpuParticle> _ssboParticles; // Binding 0
-    SSBO<PVec4>      _ssboSolver;    // Binding 1 (PredPos_Lambda, DeltaP_Rho)
-    SSBO<UVec2>        _ssboHashGrid;  // Binding 2 (Hash pairs)
-    SSBO<IVec2>        _ssboOffsets;   // Binding 3 (Cell start/end indices)
+    SSBO<GpuParticle> _ssboParticles;   // Binding 0
+    SSBO<PVec4> _ssboSolver;            // Binding 1 (PredPos_Lambda, DeltaP_Rho)
+    SSBO<UVec2> _ssboHashGrid;          // Binding 2 (Hash pairs - PRIMARY)
+    SSBO<IVec2> _ssboOffsets;           // Binding 3 (Cell start/end indices)
+
+    // Radix Sort Buffers
+    SSBO<UVec2> _ssboHashGridAlt; // Binding 4 (Hash pairs - PING-PONG)
+    SSBO<U32> _ssboHistogram;   // Binding 5 (Radix block counts / prefix sums)
+    U32 _radixSortGroups; // Tracks the number of workgroups for the histogram
+
 
     // ----------------------------
     // COMPUTE SHADER PIPELINE
     // ----------------------------
     ComputeShader _csPredictAndHash;
-    ComputeShader _csBitonicSort;
+	ComputeShader _csRadixHistogram;
+    ComputeShader _csRadixPrefixSum;
+    ComputeShader _csRadixScatter;
     ComputeShader _csBuildOffsets;
     ComputeShader _csComputeLambdas;
     ComputeShader _csComputeDeltaP;

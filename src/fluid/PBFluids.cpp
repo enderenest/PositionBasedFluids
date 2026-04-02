@@ -15,8 +15,12 @@ PBFluids::PBFluids(const FluidConfig& p)
     , _ssboSolver(0)
     , _ssboHashGrid(0)
     , _ssboOffsets(0)
+    , _ssboHashGridAlt(0)
+    , _ssboHistogram(0)
     , _csPredictAndHash(RESOURCES_PATH "shaders/compute/CS_PredictAndHash.glsl")
-    , _csBitonicSort(RESOURCES_PATH "shaders/compute/CS_BitonicSort.glsl")
+	, _csRadixHistogram(RESOURCES_PATH "shaders/compute/CS_RadixHistogram.glsl")
+	, _csRadixPrefixSum(RESOURCES_PATH "shaders/compute/CS_RadixPrefixSum.glsl")
+    , _csRadixScatter(RESOURCES_PATH "shaders/compute/CS_RadixScatter.glsl")
     , _csBuildOffsets(RESOURCES_PATH "shaders/compute/CS_BuildOffsets.glsl")
     , _csComputeLambdas(RESOURCES_PATH "shaders/compute/CS_ComputeLambdas.glsl")
     , _csComputeDeltaP(RESOURCES_PATH "shaders/compute/CS_ComputeDeltaP.glsl")
@@ -60,7 +64,30 @@ void PBFluids::setParams(const FluidConfig& p)
     uboData.cohesionStrength = _params.cohesionStrength;
     uboData.interactionRadius = _params.interactionRadius;
     uboData.interactionStrength = _params.interactionStrength;
-    uboData.padding3 = 0.0f;
+
+    // Pre-compute constants that every shader recomputes per-neighbor
+    constexpr F32 PI = 3.14159265358979323846f;
+    F32 h  = _params.h;
+    F32 h2 = h * h;
+    F32 h3 = h2 * h;
+    F32 h4 = h2 * h2;
+    F32 h6 = h3 * h3;
+    F32 h9 = h6 * h3;
+
+    // w0_self = Poly6(r=0, h) = (315/(64*PI)) * (h²)³ / h⁹ = (315/(64*PI)) / h³
+    uboData.w0_self = (315.0f / (64.0f * PI)) / h3;
+
+    // poly6Coeff = 315 / (64 * PI * h^9)  — multiply by (h²-r²)³ to get W
+    uboData.poly6Coeff = 315.0f / (64.0f * PI * h9);
+
+    // spikyCoeff = 45 / (PI * h^6)  — multiply by (h-dist)² to get |∇W|
+    uboData.spikyCoeff = 45.0f / (PI * h6);
+
+    // invRho0 = 1 / rho0
+    uboData.invRho0 = 1.0f / _params.rho0;
+
+    // hashMask = hashSize - 1  (all hashSizes are powers of 2)
+    uboData.hashMask = _params.hashSize - 1;
 
     _uboConfig.upload(uboData);
 }
@@ -89,9 +116,22 @@ void PBFluids::setParticles(const std::vector<Particle>& particles)
     std::vector<UVec2> dummyHash(N); // 1 uvec2 per particle (hash, original_id)
     _ssboHashGrid.upload(dummyHash);
 
+    // Radix sort ping-pong buffer
+    _ssboHashGridAlt.upload(dummyHash);
+
+    // CRITICAL FIX: Radix sort histogram (8-bit = 256 bins per workgroup)
+    // We use 256 threads per workgroup for the Scatter/Histogram shaders
+    _radixSortGroups = ((U32)N + 256 - 1) / 256;
+
+    // Allocate enough space for 256 bins per group
+    std::vector<U32> dummyHist(_radixSortGroups * 256, 0u);
+    _ssboHistogram.upload(dummyHist);
+
     // 1 ivec2 per cell (start, end). Initialize both to -1 (empty)
     std::vector<IVec2> dummyOffsets(_params.hashSize, { -1, -1 });
     _ssboOffsets.upload(dummyOffsets);
+
+
 }
 
 // ------------------------------------------------------------
@@ -128,8 +168,8 @@ void PBFluids::step()
 
     const U32 N = _params.particleCount;
 
-    // Standard compute shader workgroup size (256 threads per group)
-    const U32 workgroupSize = 512;
+    // Standard compute shader workgroup size
+    const U32 workgroupSize = 256;
     const U32 numGroups = (N + workgroupSize - 1) / workgroupSize;
     const U32 gridGroups = (_params.hashSize + workgroupSize - 1) / workgroupSize;
 
@@ -149,18 +189,60 @@ void PBFluids::step()
         _csPredictAndHash.dispatch(numGroups);
         _csPredictAndHash.wait();
 
-        // 2. Bitonic Sort (Sorting the HashGridBuffer)
-        // Bitonic sort requires a power-of-two size
-        _csBitonicSort.use();
-        _csBitonicSort.setUint("particleCount", N);
+        // 2. Radix Sort (Sorting the HashGridBuffer)
+        // (8-bit radix, 4 passes for 32-bit keys)
+        // Optimized for RTX 4060: 256 workgroup size, efficient dispatch
+        {
+            const U32 numPasses = 4; // CRITICAL: Even number prevents binding traps
+            const U32 bins = 256;    // 8-bit radix uses 256 bins
+            const U32 histSize = _radixSortGroups * bins;
+            bool sourceIsPrimary = true;
 
-        for (U32 k = 2; k <= N; k <<= 1) {
-            for (U32 j = k >> 1; j > 0; j >>= 1) {
-                _csBitonicSort.setUint("k", k);
-                _csBitonicSort.setUint("j", j);
-                _csBitonicSort.dispatch(numGroups);
-                _csBitonicSort.wait();
+            for (U32 pass = 0; pass < numPasses; ++pass) {
+                U32 bitOffset = pass * 8;
+
+                // Ping-pong bindings
+                if (sourceIsPrimary) {
+                    _ssboHashGrid.bindTo(2);       // Read from Grid
+                    _ssboHashGridAlt.bindTo(4);    // Write to Alt
+                }
+                else {
+                    _ssboHashGridAlt.bindTo(2);    // Read from Alt
+                    _ssboHashGrid.bindTo(4);       // Write to Grid
+                }
+                _ssboHistogram.bindTo(5);
+
+                // Pass A: Build per-workgroup histograms
+                _csRadixHistogram.use();
+                _csRadixHistogram.setUint("bitOffset", bitOffset);
+                _csRadixHistogram.setUint("particleCount", N);
+                _csRadixHistogram.setUint("numWorkgroups", _radixSortGroups);
+                _csRadixHistogram.dispatch(_radixSortGroups);
+                _csRadixHistogram.wait();
+
+                // Pass B: Exclusive prefix sum over histogram
+                _csRadixPrefixSum.use();
+                _csRadixPrefixSum.setUint("totalCount", histSize);
+                _csRadixPrefixSum.dispatch(1);
+                _csRadixPrefixSum.wait();
+
+                // Pass C: Scatter elements to destination
+                _csRadixScatter.use();
+                _csRadixScatter.setUint("bitOffset", bitOffset);
+                _csRadixScatter.setUint("particleCount", N);
+                _csRadixScatter.setUint("numWorkgroups", _radixSortGroups);
+                _csRadixScatter.dispatch(_radixSortGroups);
+                _csRadixScatter.wait();
+
+                sourceIsPrimary = !sourceIsPrimary;
             }
+
+            // Because we did exactly 4 passes, sourceIsPrimary is true again.
+            // The final pass read from Alt (binding 2) and wrote to Grid (binding 4).
+            // This means the perfectly sorted data safely landed back in _ssboHashGrid!
+
+            // Lock the sorted buffer into binding 2 for the Constraint Solver
+            _ssboHashGrid.bindTo(2);
         }
 
         // 3. Build Grid Offsets

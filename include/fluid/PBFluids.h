@@ -51,6 +51,12 @@ struct FluidConfigUBO {
     F32 poly6Coeff;    // 315.0 / (64.0 * PI * h^9)
     F32 spikyCoeff;    // 45.0 / (PI * h^6)
     F32 invRho0;       // 1.0 / rho0
+
+    // APBF: adaptive solver iteration params
+    U32 minLOD;
+    U32 maxLOD;
+    F32 lodMaxDist;
+    U32 enableAPBF;
 };
 
 
@@ -80,6 +86,9 @@ public:
 
     void setParams(const FluidConfig& p);
     const FluidConfig& params() const { return _params; }
+
+    // Must be called each frame before step() for APBF LOD computation
+    void setCameraPos(const PVec3& pos) { _cameraPos = pos; }
 
     // Particles
     void setParticles(const std::vector<Particle>& particles);
@@ -170,6 +179,10 @@ private:
     SSBO<U32> _ssboHistogram;   // Binding 5 (Radix block counts / prefix sums)
     U32 _radixSortGroups; // Tracks the number of workgroups for the histogram
 
+    // APBF: per-particle LOD (solver iterations assigned by camera distance)
+    SSBO<U32> _ssboLOD;        // Binding 7
+    PVec3 _cameraPos{ 0, 0, 0 };
+    void initLODBuffer();
 
     // ----------------------------
     // COMPUTE SHADER PIPELINE
@@ -184,6 +197,7 @@ private:
     ComputeShader _csApplyDeltaP;
     ComputeShader _csIntegrate;
     ComputeShader _csVorticity;
+    ComputeShader _csComputeLOD;
 };
 
 #endif

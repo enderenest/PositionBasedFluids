@@ -54,6 +54,12 @@ struct FluidConfig {
 	// Vorticity confinement
 	bool enableVorticity = true;
 	F32 vorticityEpsilon = 0.05f;				// re-injects rotational energy lost to damping
+
+	// APBF: Adaptive solver iterations (Köster & Krüger, 2016)
+	bool enableAPBF = false;
+	U32  minLOD = 2;          // solver iters for far/interior particles
+	U32  maxLOD = 7;          // solver iters for near/surface particles
+	F32  lodMaxDist = 15.0f;  // camera distance at which LOD clamps to minLOD
 };
 
 // ---------------------------

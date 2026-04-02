@@ -17,6 +17,7 @@ PBFluids::PBFluids(const FluidConfig& p)
     , _ssboOffsets(0)
     , _ssboHashGridAlt(0)
     , _ssboHistogram(0)
+    , _ssboLOD(0)
     , _csPredictAndHash(RESOURCES_PATH "shaders/compute/CS_PredictAndHash.glsl")
 	, _csRadixHistogram(RESOURCES_PATH "shaders/compute/CS_RadixHistogram.glsl")
 	, _csRadixPrefixSum(RESOURCES_PATH "shaders/compute/CS_RadixPrefixSum.glsl")
@@ -27,6 +28,7 @@ PBFluids::PBFluids(const FluidConfig& p)
     , _csApplyDeltaP(RESOURCES_PATH "shaders/compute/CS_ApplyDeltaP.glsl")
     , _csIntegrate(RESOURCES_PATH "shaders/compute/CS_Integrate.glsl")
     , _csVorticity(RESOURCES_PATH "shaders/compute/CS_VorticityConfinement.glsl")
+    , _csComputeLOD(RESOURCES_PATH "shaders/compute/CS_ComputeLOD.glsl")
 {
     setParams(p);
 }
@@ -89,7 +91,18 @@ void PBFluids::setParams(const FluidConfig& p)
     // hashMask = hashSize - 1  (all hashSizes are powers of 2)
     uboData.hashMask = _params.hashSize - 1;
 
+    // APBF adaptive iteration params
+    uboData.minLOD     = _params.enableAPBF ? _params.minLOD : _params.solverIterations;
+    uboData.maxLOD     = _params.enableAPBF ? _params.maxLOD : _params.solverIterations;
+    uboData.lodMaxDist = _params.lodMaxDist;
+    uboData.enableAPBF = _params.enableAPBF ? 1u : 0u;
+
     _uboConfig.upload(uboData);
+
+    // When APBF is disabled, ensure LOD = solverIterations so all
+    // particles are always active (lod[id] >= currentIter for every iter).
+    if (!_params.enableAPBF && _ssboLOD.count() > 0)
+        initLODBuffer();
 }
 
 void PBFluids::setParticles(const std::vector<Particle>& particles)
@@ -131,7 +144,17 @@ void PBFluids::setParticles(const std::vector<Particle>& particles)
     std::vector<IVec2> dummyOffsets(_params.hashSize, { -1, -1 });
     _ssboOffsets.upload(dummyOffsets);
 
+    // APBF LOD buffer — 1 uint per particle
+    initLODBuffer();
+}
 
+void PBFluids::initLODBuffer()
+{
+    // Default LOD = solverIterations so all particles always active when APBF off.
+    // When APBF on, the CS_ComputeLOD shader overwrites this each frame.
+    const U32 defaultLOD = _params.enableAPBF ? _params.maxLOD : _params.solverIterations;
+    std::vector<U32> lodData(_params.particleCount, defaultLOD);
+    _ssboLOD.upload(lodData);
 }
 
 // ------------------------------------------------------------
@@ -180,6 +203,7 @@ void PBFluids::step()
     _ssboSolver.bindTo(1);
     _ssboHashGrid.bindTo(2);
     _ssboOffsets.bindTo(3);
+    _ssboLOD.bindTo(7);
 
     // XPBD Substepping Loop
     for (U32 s = 0; s < _params.substepIterations; ++s) {
@@ -258,18 +282,31 @@ void PBFluids::step()
         _csBuildOffsets.dispatch(numGroups);
         _csBuildOffsets.wait();
 
-        // 4. Constraint Solving
-        for (U32 iter = 0; iter < _params.solverIterations; ++iter) {
+        // 4a. APBF: assign per-particle LOD from camera distance
+        if (_params.enableAPBF) {
+            _csComputeLOD.use();
+            _csComputeLOD.setVec3("cameraPos", _cameraPos.x, _cameraPos.y, _cameraPos.z);
+            _csComputeLOD.dispatch(numGroups);
+            _csComputeLOD.wait();
+        }
+
+        // 4b. Constraint Solving
+        // iter is 1-based: particle is active if lod[id] >= iter (eq. 9 in APBF paper)
+        const U32 maxIter = _params.enableAPBF ? _params.maxLOD : _params.solverIterations;
+        for (U32 iter = 1; iter <= maxIter; ++iter) {
 
             _csComputeLambdas.use();
+            _csComputeLambdas.setUint("currentIter", iter);
             _csComputeLambdas.dispatch(numGroups);
             _csComputeLambdas.wait();
 
             _csComputeDeltaP.use();
+            _csComputeDeltaP.setUint("currentIter", iter);
             _csComputeDeltaP.dispatch(numGroups);
             _csComputeDeltaP.wait();
 
             _csApplyDeltaP.use();
+            _csApplyDeltaP.setUint("currentIter", iter);
             _csApplyDeltaP.dispatch(numGroups);
             _csApplyDeltaP.wait();
         }

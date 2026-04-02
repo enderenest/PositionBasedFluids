@@ -34,10 +34,18 @@ layout(std140, binding = 0) uniform FluidConfig {
     float poly6Coeff;
     float spikyCoeff;
     float invRho0;
+    // APBF params
+    uint minLOD;
+    uint maxLOD;
+    float lodMaxDist;
+    uint enableAPBF;
 } ubo;
 
+// Per-iteration uniform for APBF
+uniform uint currentIter;
+
 // =========================================================================
-// SSBOs (Bindings 1, 2, 3)
+// SSBOs (Bindings 1, 2, 3, 7)
 // =========================================================================
 struct SolverData {
     vec4 predPos_lambda; // xyz: predPos, w: lambda
@@ -54,6 +62,10 @@ layout(std430, binding = 2) buffer HashGridBuffer {
 
 layout(std430, binding = 3) buffer CellOffsetBuffer {
     ivec2 offsets[];
+};
+
+layout(std430, binding = 7) buffer LODBuffer {
+    uint lod[];
 };
 
 // =========================================================================
@@ -108,6 +120,9 @@ uint getGridHash(ivec3 cell) {
 void main() {
     uint id = gl_GlobalInvocationID.x;
     if (id >= ubo.particleCount) return;
+
+    // APBF: particle is active in iteration l only if lod[id] >= l (eq. 9)
+    if (ubo.enableAPBF != 0u && lod[id] < currentIter) return;
 
     vec3 xi = solver[id].predPos_lambda.xyz;
     float lambda_i = solver[id].predPos_lambda.w;

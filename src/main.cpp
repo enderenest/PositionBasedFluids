@@ -437,6 +437,18 @@ int main() {
         vortDirty |= ImGui::SliderFloat("epsilon", &cfg.fluid.vorticityEpsilon, 0.f, 1.f);
         if (vortDirty) solverDirty = true;
 
+        ImGui::Separator(); ImGui::Text("APBF (Adaptive Iterations)");
+        bool apbfDirty = false;
+        apbfDirty |= ImGui::Checkbox("enableAPBF", &cfg.fluid.enableAPBF);
+        if (cfg.fluid.enableAPBF) {
+            { int v = (int)cfg.fluid.minLOD;
+              if (ImGui::SliderInt("minLOD", &v, 1, 8)) { cfg.fluid.minLOD = (U32)v; apbfDirty = true; } }
+            { int v = (int)cfg.fluid.maxLOD;
+              if (ImGui::SliderInt("maxLOD", &v, 1, 12)) { cfg.fluid.maxLOD = (U32)v; apbfDirty = true; } }
+            apbfDirty |= ImGui::SliderFloat("lodMaxDist", &cfg.fluid.lodMaxDist, 1.0f, 30.0f);
+        }
+        if (apbfDirty) solverDirty = true;
+
         ImGui::Separator();
         ImGui::TextDisabled("LMB: interact  |  RMB: orbit  |  MMB: pan  |  Scroll: zoom");
         ImGui::End();
@@ -460,6 +472,13 @@ int main() {
 
         // ---- Simulation step (GPU only) -------------------------
         if (!paused || stepOnce) {
+            // Pass camera position for APBF LOD computation
+            float cx = g_camDist * cosf(g_camPitch) * sinf(g_camYaw);
+            float cy = g_camDist * sinf(g_camPitch);
+            float cz = g_camDist * cosf(g_camPitch) * cosf(g_camYaw);
+            glm::vec3 camPos = g_camTarget + glm::vec3(cx, cy, cz);
+            fluid.setCameraPos({ camPos.x, camPos.y, camPos.z });
+
             fluid.step();
             stepOnce = false;
         }

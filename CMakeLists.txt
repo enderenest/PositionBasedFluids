@@ -23,7 +23,7 @@ if(MSVC)
 add_compile_options(/arch:AVX2) #make sure SIMD optimizations take place
 endif()
 
-project(HybridSim)
+project(PBFSim)
 
 
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)

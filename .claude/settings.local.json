@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build build --config Release)",
+      "Bash(cmake --build out/build --config Release)",
+      "Bash(cmake --build out/build/x64-Release)"
+    ]
+  }
+}

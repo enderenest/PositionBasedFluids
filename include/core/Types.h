@@ -33,6 +33,14 @@ struct PVec4 {
 	F32 x, y, z, w;
 };
 
+struct UVec2 {
+	U32 x, y;
+};
+
+struct IVec2 {
+	I32 x, y;
+};
+
 // Basic helpers
 inline PVec3 make_pvec3(F32 x, F32 y, F32 z) { return { x, y, z }; }
 

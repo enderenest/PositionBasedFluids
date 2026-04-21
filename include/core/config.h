@@ -4,45 +4,62 @@
 #include "core/Types.h"
 
 // ---------------------------
-// Fluid config (CPU PBF now, later convert it to GPU format)
+// Fluid config
 // ---------------------------
 struct FluidConfig {
-	// time step - use fixed small dt with substeps for stability
+	// time step
 	F32 dt = 1.0f / 60.0f;						// macro timestep: 60 FPS
-	PVec3 gravity = { 0.0f, -9.81f, 0.0f };		// realistic gravity
+	PVec3 gravity = { 0.0f, -3.81f, 0.0f };
 
 	// PBF / SPH kernels
-	F32 h = 0.20f;								// smoothing radius: h/spacing = 2.0 is the minimum stable ratio for PBF
-	F32 rho0 = 1000.0f;							// rest density calibrated to natural packing: ~1024 for m=1, h=0.2, spacing=0.1
-	I32 solverIterations = 3;					// PBF needs 5-10 iterations to converge
-	I32 substepIterations = 2;					// smaller substeps improve stability
-	F32 eps = 0.0001f;							// constraint regularization
+	F32 h = 0.15f;								// smoothing radius: h/spacing = 2.0 (minimum stable PBF ratio)
+	F32 rho0 = 1200.0f;						// rest density for m=1, h=0.2, spacing=0.1
+	U32 solverIterations = 3;					// increased from 2: cohesion needs more iterations for stability
+	U32 substepIterations = 2;					// increased: smaller effective dt reduces ceiling sticking from cohesion overshoot
+	F32 eps = 0.0001f;							// increased from 0.00001: cohesion needs stronger regularization
 
-	// Spawn configuration
-	I32  particleCount = 1024;					// 64^3 cube = reasonable for CPU testing
-	PVec3 spawnMin = { 0.25f, 0.25f, 0.25f };	// centered region
-	PVec3 spawnMax = { 1.75f, 1.75f, 1.75f };	// 2 unit cube
-	bool spawnRandom = false;					// grid spawn: ensures uniform spacing, no initial overlaps
-	F32  spacing = 0.1f;						// matches smoothing radius (critical for neighbor search)
+	// Spawn configuration — 65K particles, dam-break block
+	U32  particleCount = 1 << 15;				// 65536 particles
+	PVec3 spawnMin = { 2.f, 0.2f, 2.f };		// lower corner of fluid block
+	PVec3 spawnMax = { 5.f, 5.f, 5.f };		// ~41^3 = 68921 grid slots > 65536
+	bool spawnRandom = false;					// grid spawn: uniform spacing, no overlaps
+	F32  spacing = 0.1f;						// particle spacing = h/2 (stable packing)
 	PVec3 initialVelocity = { 0.0f, 0.0f, 0.0f };
 
 	// Boundary handling
-	PVec3 boundsMin = { 0.0f, 0.0f, 0.0f };		// lower corner
-	PVec3 boundsMax = { 2.0f, 2.0f, 2.0f };		// upper corner (1 unit margin on each side)
-	F32 boundDamping = 0.5f;					
+	PVec3 boundsMin = { 0.0f, 0.0f, 0.0f };
+	PVec3 boundsMax = { 6.0f, 6.0f, 6.0f };
+	F32 boundDamping = 0.5f;					// reduced: less energy retained at walls, particles fall away from ceiling
 
 	// Neighbor search hash grid
-	U32 hashSize = 1 << 16;						// 65536 cells (increased from 1<<14 for 4K particles)
+	U32 hashSize = 1 << 17;					// 262144 cells: 4:1 ratio reduces hash collisions
 
-	// Surface tension correction (sCorr) - essential for surface stability
-	bool enableSCorr = true;					// enable to suppress particle clustering
-	F32 kCorr = 0.001f;							// tensile correction strength (needs to be non-trivial with unclamped lambdas)
-	F32 nCorr = 4.0f;							// standard exponent
-	F32 deltaQ = 0.3f;							// reference distance ratio: 0.5 * h = 0.1 = particle spacing
+	// Surface tension correction (sCorr)
+	bool enableSCorr = true;					// suppress particle clustering at surface
+	F32 kCorr = 0.001f;						// tensile correction strength
+	F32 nCorr = 4.0f;							// restored to 4.0 for surface tension stability with cohesion
+	F32 deltaQ = 0.3f;							// reference distance ratio (0.3 * h)
 
-	// XSPH viscosity - moderate damping
-	bool enableViscosity = true;				// enable for energy dissipation
-	F32 viscosity = 0.0f;						// low viscosity to preserve fluid dynamics
+	// Cohesion (soft constraint on low-density regions for droplet formation)
+	F32 cohesionStrength = 0.001f;				// reduced: weaker cohesion so gravity wins over wall attraction
+
+	// XSPH viscosity
+	bool enableViscosity = true;				// energy dissipation for stability
+	F32 viscosity = 0.1f;						// light viscosity: damps jitter without killing flow
+
+	// Mouse interaction
+	F32 interactionRadius = 1.5f;				// world-space radius of influence
+	F32 interactionStrength = 25.0f;				// force magnitude (negative = push, positive = pull)
+
+	// Vorticity confinement
+	bool enableVorticity = true;
+	F32 vorticityEpsilon = 0.05f;				// re-injects rotational energy lost to damping
+
+	// APBF: Adaptive solver iterations (Köster & Krüger, 2016)
+	bool enableAPBF = false;
+	U32  minLOD = 2;          // solver iters for far/interior particles
+	U32  maxLOD = 7;          // solver iters for near/surface particles
+	F32  lodMaxDist = 15.0f;  // camera distance at which LOD clamps to minLOD
 };
 
 // ---------------------------

@@ -11,6 +11,10 @@
 **Position-Based Fluids** is a production-ready fluid simulation system that combines the stability and efficiency of position-based dynamics with the scalability of GPU computing. It simulates incompressible fluids at interactive framerates with up to **131,072 particles** (2^17), suitable for games, visual effects, and scientific visualization.
 
 The simulator implements the classical PBF algorithm (Macklin & Müller, 2013) with modern GPU optimizations:
+
+## Screenshots
+
+![Fluid Simulation Snapshot](resources/assets/snapshot.png)
 - **Fully GPU-accelerated** particle updates via compute shaders
 - **Radix sort** for O(n) spatial sorting instead of O(n log n)
 - **Adaptive LOD** for view-dependent solver iterations
